@@ -28,6 +28,20 @@ sudo xattr -cr /Applications/Jellium\ Desktop.app
 
 This project uses [just](https://github.com/casey/just) as a command runner.
 
+### macOS with Nix
+
+With Nix flakes and Xcode Command Line Tools installed, enter the pinned development environment:
+
+```sh
+nix develop
+just build
+just test
+just dmg
+```
+
+Alternatively, run `direnv allow` to load it automatically through `.envrc`.
+The flake supports Apple Silicon and Intel Macs and supplies Rust, build tools, and native dependencies without Homebrew. It builds the project's mpv fork, not a system mpv. The app is staged in `build/output/Jellium Desktop.app` and the DMG in `dist/`.
+
 ```
 Available recipes:
     [package]

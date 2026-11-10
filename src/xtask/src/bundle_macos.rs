@@ -33,8 +33,9 @@ pub fn complete(app: &Path) -> Result<()> {
 
     println!("App bundle: {}", app.display());
 
-    let brew_prefix = brew_prefix()?;
-    println!("Homebrew prefix: {}", brew_prefix.display());
+    let brew_prefix =
+        dependency_prefix(std::env::var_os("JFN_MACOS_DEPS_PREFIX").map(PathBuf::from))?;
+    println!("Dependency prefix: {}", brew_prefix.display());
 
     // CEF framework: rewrite install_name from build-tree (@executable_path/Frameworks/...)
     // to bundle-tree (@executable_path/../Frameworks/...).
@@ -359,7 +360,16 @@ fn install_name_tool(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn brew_prefix() -> Result<PathBuf> {
+fn dependency_prefix(configured: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(prefix) = configured {
+        if !prefix.join("lib").is_dir() {
+            bail!(
+                "dependency prefix has no lib directory: {}",
+                prefix.display()
+            );
+        }
+        return Ok(prefix);
+    }
     let out = Command::new("brew")
         .arg("--prefix")
         .output()
@@ -368,4 +378,27 @@ fn brew_prefix() -> Result<PathBuf> {
         bail!("brew --prefix failed");
     }
     Ok(PathBuf::from(String::from_utf8(out.stdout)?.trim()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_dependency_prefix_does_not_require_homebrew() -> Result<()> {
+        let prefix = tempfile::tempdir()?;
+        std::fs::create_dir(prefix.path().join("lib"))?;
+        assert_eq!(
+            dependency_prefix(Some(prefix.path().to_path_buf()))?,
+            prefix.path()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn configured_dependency_prefix_requires_a_lib_directory() -> Result<()> {
+        let prefix = tempfile::tempdir()?;
+        assert!(dependency_prefix(Some(prefix.path().to_path_buf())).is_err());
+        Ok(())
+    }
 }

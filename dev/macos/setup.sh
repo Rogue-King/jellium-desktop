@@ -11,6 +11,15 @@ if ! xcode-select -p > /dev/null 2>&1; then
     exit 0
 fi
 
+if [ -n "${JFN_MACOS_DEPS_PREFIX:-}" ]; then
+    if [ ! -d "${JFN_MACOS_DEPS_PREFIX}/lib" ]; then
+        echo "error: dependency prefix has no lib directory: ${JFN_MACOS_DEPS_PREFIX}" >&2
+        exit 1
+    fi
+    echo "Using dependencies from ${JFN_MACOS_DEPS_PREFIX}"
+    exit 0
+fi
+
 echo "Checking Homebrew..."
 if ! command -v brew > /dev/null; then
     echo "error: Homebrew not found. Install from https://brew.sh" >&2
