@@ -43,6 +43,12 @@
 
           JFN_MACOS_DEPS_PREFIX = dependencyPrefix;
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+
+          shellHook = ''
+            # mpv's Swift compiler needs the SDK from the same Xcode toolchain.
+            export MACOS_SDK="$(/usr/bin/env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun --sdk macosx --show-sdk-path)"
+            export MACOS_SDK_VERSION="$(/usr/bin/env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun --sdk macosx --show-sdk-version)"
+          '';
         };
       });
   };
