@@ -48,6 +48,9 @@
             # mpv's Swift compiler needs the SDK from the same Xcode toolchain.
             export MACOS_SDK="$(/usr/bin/env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun --sdk macosx --show-sdk-path)"
             export MACOS_SDK_VERSION="$(/usr/bin/env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun --sdk macosx --show-sdk-version)"
+            export JFN_MPV_LIB_DIR="$PWD/build/mpv-build"
+            export JFN_CEF_TEST_FRAMEWORK="$PWD/build/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+            export DYLD_FALLBACK_LIBRARY_PATH="$JFN_MPV_LIB_DIR''${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
           '';
         };
       });

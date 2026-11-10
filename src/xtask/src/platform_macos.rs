@@ -35,13 +35,10 @@ pub fn stage_cef(out: &Path, cef: &cef::Cef) -> Result<()> {
         bin.as_os_str(),
     ])?;
     // libEGL / libGLESv2 symlinks (CEF expects them next to the binary on macOS).
-    for lib in ["libEGL.dylib", "libGLESv2.dylib"] {
-        let dst = out.join(lib);
-        let _ = std::fs::remove_file(&dst);
-        let target = format!("Frameworks/{FRAMEWORK_NAME}.framework/Libraries/{lib}");
-        std::os::unix::fs::symlink(&target, &dst)
-            .with_context(|| format!("symlink {} -> {}", dst.display(), target))?;
-    }
+    link_angle_libraries(
+        out,
+        Path::new(&format!("Frameworks/{FRAMEWORK_NAME}.framework")),
+    )?;
     Ok(())
 }
 
@@ -95,13 +92,10 @@ pub fn install(build_dir: &Path, prefix: &Path, _args: &crate::BuildArgs) -> Res
     xfs::copy_dir_recursive(&fw_src, &fw_dst)?;
 
     // libEGL / libGLESv2 symlinks (bundle layout: MacOS/ → ../Frameworks/...).
-    for lib in ["libEGL.dylib", "libGLESv2.dylib"] {
-        let dst = macos_dir.join(lib);
-        let _ = std::fs::remove_file(&dst);
-        let target = format!("../Frameworks/{FRAMEWORK_NAME}.framework/Libraries/{lib}");
-        std::os::unix::fs::symlink(&target, &dst)
-            .with_context(|| format!("symlink {} -> {}", dst.display(), target))?;
-    }
+    link_angle_libraries(
+        &macos_dir,
+        Path::new(&format!("../Frameworks/{FRAMEWORK_NAME}.framework")),
+    )?;
 
     // Info.plist
     let ver = version::read()?;
@@ -142,6 +136,21 @@ pub fn install(build_dir: &Path, prefix: &Path, _args: &crate::BuildArgs) -> Res
     Ok(app)
 }
 
+fn link_angle_libraries(directory: &Path, framework: &Path) -> Result<()> {
+    for lib in ["libEGL.dylib", "libGLESv2.dylib"] {
+        let dst = directory.join(lib);
+        if dst.exists() || dst.is_symlink() {
+            std::fs::remove_file(&dst)?;
+        }
+        let target = framework.join("Libraries").join(lib);
+        if directory.join(&target).is_file() {
+            std::os::unix::fs::symlink(&target, &dst)
+                .with_context(|| format!("symlink {} -> {}", dst.display(), target.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn run_install_name_tool(args: &[&std::ffi::OsStr]) -> Result<()> {
     let status = Command::new("install_name_tool")
         .args(args)
@@ -151,4 +160,26 @@ fn run_install_name_tool(args: &[&std::ffi::OsStr]) -> Result<()> {
         bail!("install_name_tool failed");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn angle_links_require_shipped_libraries_and_remove_stale_links() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let framework = Path::new("Frameworks/CEF.framework");
+        let libraries = root.path().join(framework).join("Libraries");
+        std::fs::create_dir_all(&libraries)?;
+        std::fs::write(libraries.join("libEGL.dylib"), [])?;
+        std::os::unix::fs::symlink("missing", root.path().join("libGLESv2.dylib"))?;
+        link_angle_libraries(root.path(), framework)?;
+        assert!(root.path().join("libEGL.dylib").is_file());
+        assert!(!root.path().join("libGLESv2.dylib").is_symlink());
+        std::fs::remove_file(libraries.join("libEGL.dylib"))?;
+        link_angle_libraries(root.path(), framework)?;
+        assert!(!root.path().join("libEGL.dylib").is_symlink());
+        Ok(())
+    }
 }

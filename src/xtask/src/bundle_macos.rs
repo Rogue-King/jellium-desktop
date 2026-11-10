@@ -72,7 +72,10 @@ pub fn complete(app: &Path) -> Result<()> {
         })
         .collect();
 
-    let mut queue: Vec<PathBuf> = Vec::new();
+    let mut queue: Vec<PathBuf> = framework_libs
+        .iter()
+        .map(|name| fw_dir.join(name))
+        .collect();
     for entry in std::fs::read_dir(&macos_dir)? {
         let p = entry?.path();
         if p.extension().and_then(|s| s.to_str()) == Some("dylib") {
@@ -135,6 +138,13 @@ fn fix_lib_deps(
         return Ok(());
     }
     let text = String::from_utf8_lossy(&output.stdout);
+    let load_commands = Command::new("otool").arg("-l").arg(lib).output()?;
+    if !load_commands.status.success() {
+        bail!("otool -l failed: {}", lib.display());
+    }
+    for rpath in non_system_rpaths(&String::from_utf8_lossy(&load_commands.stdout)) {
+        install_name_tool(&["-delete_rpath", rpath, &lib.to_string_lossy()])?;
+    }
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -176,6 +186,17 @@ fn fix_lib_deps(
         install_name_tool(&["-change", &dep_path, &target, &lib.to_string_lossy()])?;
     }
     Ok(())
+}
+
+fn non_system_rpaths(load_commands: &str) -> Vec<&str> {
+    load_commands
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("path "))
+        .filter_map(|line| line.rsplit_once(" (offset ").map(|(path, _)| path))
+        .filter(|path| {
+            path.starts_with('/') && !SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p))
+        })
+        .collect()
 }
 
 fn resolve_dependency(dep_path: &str, brew_prefix: &Path) -> Option<String> {
@@ -345,7 +366,12 @@ fn sign(path: &Path, entitlements: Option<&Path>) -> Result<()> {
         cmd.arg("--entitlements").arg(e);
     }
     cmd.arg(path);
-    let _ = cmd.status();
+    let status = cmd
+        .status()
+        .with_context(|| format!("codesign {}", path.display()))?;
+    if !status.success() {
+        bail!("codesign failed: {}", path.display());
+    }
     Ok(())
 }
 
@@ -392,6 +418,29 @@ mod tests {
             dependency_prefix(Some(prefix.path().to_path_buf()))?,
             prefix.path()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rpath_cleanup_preserves_system_and_bundle_search_paths() {
+        let commands = "path /nix/store/native deps/lib (offset 12)\n\
+                        path /Applications/Xcode.app/lib/swift (offset 12)\n\
+                        path /usr/lib/swift (offset 12)\n\
+                        path @executable_path/../Frameworks (offset 12)\n\
+                        name /nix/store/linked.dylib (offset 24)";
+        assert_eq!(
+            non_system_rpaths(commands),
+            vec![
+                "/nix/store/native deps/lib",
+                "/Applications/Xcode.app/lib/swift"
+            ]
+        );
+    }
+
+    #[test]
+    fn signing_failure_is_reported() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        assert!(sign(&root.path().join("missing"), None).is_err());
         Ok(())
     }
 
