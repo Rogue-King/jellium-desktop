@@ -165,15 +165,14 @@ fn fix_lib_deps(
             eprintln!("warning: could not resolve: {dep_path}");
             continue;
         };
-        let Some(dep_name) = Path::new(&resolved).file_name() else {
+        let real = std::fs::canonicalize(&resolved)?;
+        let Some(dep_name) = bundled_library_name(&real) else {
             eprintln!("warning: dependency has no file name: {resolved}");
             continue;
         };
-        let dep_name = dep_name.to_string_lossy().into_owned();
         let target = format!("@executable_path/../Frameworks/{dep_name}");
 
         if !framework_libs.contains(&dep_name) {
-            let real = std::fs::canonicalize(&resolved)?;
             println!("Bundling: {dep_name}");
             let dst = fw_dir.join(&dep_name);
             copy_writable(&real, &dst)?;
@@ -186,6 +185,17 @@ fn fix_lib_deps(
         install_name_tool(&["-change", &dep_path, &target, &lib.to_string_lossy()])?;
     }
     Ok(())
+}
+
+fn bundled_library_name(source: &Path) -> Option<String> {
+    let name = source.file_name()?.to_string_lossy();
+    // Nix can provide incompatible libraries with the same dylib basename.
+    if let Ok(relative) = source.strip_prefix("/nix/store") {
+        let package = relative.components().next()?.as_os_str().to_string_lossy();
+        let (hash, _) = package.split_once('-')?;
+        return Some(format!("{hash}-{name}"));
+    }
+    Some(name.into_owned())
 }
 
 fn non_system_rpaths(load_commands: &str) -> Vec<&str> {
@@ -419,6 +429,22 @@ mod tests {
             prefix.path()
         );
         Ok(())
+    }
+
+    #[test]
+    fn nix_library_names_preserve_distinct_providers_of_the_same_basename() {
+        assert_eq!(
+            bundled_library_name(Path::new("/nix/store/apple-libiconv/lib/libiconv.2.dylib")),
+            Some("apple-libiconv.2.dylib".into())
+        );
+        assert_eq!(
+            bundled_library_name(Path::new("/nix/store/gnu-libiconv/lib/libiconv.2.dylib")),
+            Some("gnu-libiconv.2.dylib".into())
+        );
+        assert_eq!(
+            bundled_library_name(Path::new("/opt/homebrew/lib/libiconv.2.dylib")),
+            Some("libiconv.2.dylib".into())
+        );
     }
 
     #[test]

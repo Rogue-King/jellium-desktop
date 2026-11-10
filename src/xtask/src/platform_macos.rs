@@ -68,6 +68,9 @@ pub fn install(build_dir: &Path, prefix: &Path, _args: &crate::BuildArgs) -> Res
     let fw_dir = app.join("Contents").join("Frameworks");
     let resources_dir = app.join("Contents").join("Resources");
     std::fs::create_dir_all(&macos_dir)?;
+    if fw_dir.exists() {
+        std::fs::remove_dir_all(&fw_dir)?;
+    }
     std::fs::create_dir_all(&fw_dir)?;
     std::fs::create_dir_all(&resources_dir)?;
 
@@ -86,9 +89,6 @@ pub fn install(build_dir: &Path, prefix: &Path, _args: &crate::BuildArgs) -> Res
         .join("Frameworks")
         .join(format!("{FRAMEWORK_NAME}.framework"));
     let fw_dst = fw_dir.join(format!("{FRAMEWORK_NAME}.framework"));
-    if fw_dst.exists() {
-        std::fs::remove_dir_all(&fw_dst)?;
-    }
     xfs::copy_dir_recursive(&fw_src, &fw_dst)?;
 
     // libEGL / libGLESv2 symlinks (bundle layout: MacOS/ → ../Frameworks/...).
