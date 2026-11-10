@@ -154,15 +154,13 @@ pub fn jfn_playback_display_hz() -> f64 {
     state().display_hz()
 }
 
-/// Seed the display-hz cache from a synchronous probe (call only from a
-/// non-event context — sync mpv property reads from inside the event
-/// thread deadlock).
+/// Seed the display-hz cache from an asynchronous startup property reply.
 pub fn jfn_playback_set_display_hz(hz: f64) {
     state().set_display_hz(hz);
 }
 
 // ---------------------------------------------------------------------
-// Property observation + sync seed
+// Property observation
 // ---------------------------------------------------------------------
 
 /// Display-backend discriminant.
@@ -229,29 +227,6 @@ pub fn jfn_playback_observe_mpv_properties(backend: u8) -> bool {
         unsafe { jfn_mpv::sys::mpv_observe_property(raw, id, name.as_ptr(), fmt) };
     }
     true
-}
-
-/// Sync mpv read for `display-fps`; seeds the `display_hz` cache from a
-/// non-event context. Must not be called from inside an mpv event
-/// callback — sync property reads from the event thread deadlock.
-///
-/// No-op if the handle isn't initialized or the property is unavailable.
-pub fn jfn_playback_seed_display_hz_sync() {
-    let Some(raw) = jfn_mpv::boot::current_raw_handle() else {
-        return;
-    };
-    let mut fps: f64 = 0.0;
-    let rc = unsafe {
-        jfn_mpv::sys::mpv_get_property(
-            raw,
-            c"display-fps".as_ptr(),
-            jfn_mpv::sys::mpv_format::MPV_FORMAT_DOUBLE,
-            &mut fps as *mut _ as *mut std::ffi::c_void,
-        )
-    };
-    if rc >= 0 && fps > 0.0 {
-        state().set_display_hz(fps);
-    }
 }
 
 // ---------------------------------------------------------------------

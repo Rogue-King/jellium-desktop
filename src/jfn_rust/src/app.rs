@@ -40,13 +40,15 @@ enum RuntimeShutdownError {
 /// lifetime before the theme rotator takes over.
 const STARTUP_BG_HEX: &str = "#101010";
 
-enum BackgroundCapture {
-    Pending,
-    Applied { user_video_bg: u32 },
+#[derive(Default)]
+struct StartupCapture {
+    properties: jfn_mpv::api::StartupProperties,
+    user_video_bg: Option<u32>,
 }
 
 struct ReadyBoot {
     user_video_bg: u32,
+    demuxers: jfn_mpv::Node,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -113,21 +115,6 @@ fn init_logging(log_file: Option<&Path>, log_level: &str, version: &CefVersion) 
     tracing::info!(target: "Main", "CEF {}", version);
     if !log_path.is_empty() {
         tracing::info!(target: "Main", "Log file: {log_path}");
-    }
-}
-
-fn log_mpv_versions() {
-    for prop in ["mpv-version", "ffmpeg-version"] {
-        let pc = cs(prop);
-        let v = unsafe { jfn_mpv::api::jfn_mpv_get_property_string(pc.as_ptr()) };
-        let s = if v.is_null() {
-            String::new()
-        } else {
-            let s = unsafe { CStr::from_ptr(v) }.to_string_lossy().into_owned();
-            unsafe { jfn_mpv::api::jfn_mpv_free_string(v) };
-            s
-        };
-        tracing::info!(target: "Main", "{prop} {s}");
     }
 }
 
@@ -276,7 +263,7 @@ fn init_mpv_handle(opts: MpvInitOptions<'_>) -> *mut jfn_mpv::sys::mpv_handle {
 }
 
 /// Returns the completed boot state or the reason startup stopped.
-fn wait_for_vo_window(mut boot: BackgroundCapture) -> Result<ReadyBoot, BootError> {
+fn wait_for_vo_window(mut boot: StartupCapture) -> Result<ReadyBoot, BootError> {
     use std::ops::ControlFlow::{Break, Continue};
     let _shutdown_wake = crate::manager::BootShutdownWake::start()?;
     tracing::info!(target: "Main", "Waiting for mpv window...");
@@ -314,8 +301,8 @@ fn wait_for_vo_window(mut boot: BackgroundCapture) -> Result<ReadyBoot, BootErro
     outcome
 }
 
-fn publish_device_profile(mpv_raw: *mut jfn_mpv::sys::mpv_handle) {
-    let caps = unsafe { jfn_mpv::capabilities::query_raw(mpv_raw) };
+fn publish_device_profile(demuxers: &jfn_mpv::Node) {
+    let caps = jfn_mpv::capabilities::from_demuxer_node(demuxers);
     let decoders: Vec<jfn_jellyfin::Codec> = caps
         .decoders
         .into_iter()
@@ -759,7 +746,6 @@ impl RunningRuntime {
 /// Boot-time mpv size reconcile (saved scale vs the scale the platform
 /// reports); seeds the display-hz cache and returns it for browser init.
 fn boot_mpv_reconcile() -> Option<jfn_gpu_paint::RefreshRate> {
-    jfn_playback::ingest_driver::jfn_playback_seed_display_hz_sync();
     let hz = jfn_playback::ingest_driver::jfn_playback_display_hz();
     let rate = jfn_gpu_paint::RefreshRate::from_hz(hz);
     if let Some(rate) = rate {
@@ -1032,19 +1018,19 @@ fn run_app(
         return 1;
     }
 
-    // force-window=yes keeps VO creation on mpv's core thread. The user's
-    // mpv.conf color is only known after mpv_initialize parsed the config, so
-    // the capture is async: the reply lands in the boot pump, which writes the
-    // override and gates boot readiness on it.
-    jfn_mpv::api::jfn_mpv_request_background_color();
+    // Keep native events flowing until every startup read has replied: even
+    // after the window exists, a property write can dispatch back to AppKit.
+    let boot = StartupCapture::default();
+    if let Err(error) = boot.properties.request() {
+        tracing::error!(target: "Main", "request startup properties: {error}");
+        return 1;
+    }
 
     // input-default-bindings=no drops the builtin CLOSE_WIN -> quit binding;
     // the WM close button needs it back.
     install_mpv_close_binding();
 
     resources.native.get_mut().mpv.window_wake = Some(wake_mpv_on_window_change());
-
-    let boot = BackgroundCapture::Pending;
 
     // Platform init precedes both the shell overlay and `CefInitialize`: the
     // overlay's surface needs the backend's compositor devices, and the
@@ -1115,7 +1101,6 @@ fn run_app(
             }
         }
     }
-    log_mpv_versions();
     run_with_cef(boot, deferred, resources, &opts, instance)
 }
 
@@ -1150,9 +1135,25 @@ enum BootEvent {
     Consumed,
 }
 
-/// Log messages reach tracing, the background-color reply applies the startup
-/// override, every other event reaches the ingest layer.
-fn consume_boot_event(boot: &mut BackgroundCapture, event: jfn_mpv::api::WaitEvent) -> BootEvent {
+/// Startup replies are captured while the native event loop is still pumped;
+/// every other event reaches tracing or the ingest layer.
+fn consume_boot_event(boot: &mut StartupCapture, event: jfn_mpv::api::WaitEvent) -> BootEvent {
+    if let jfn_mpv::api::WaitEvent::Event(ref event) = event
+        && boot.properties.capture(event)
+    {
+        if boot.user_video_bg.is_none()
+            && let Some(color) = boot.properties.background_color
+        {
+            apply_startup_background(boot, color);
+        }
+        if let jfn_mpv::Event::GetPropertyReply { name, .. } = event
+            && name == "display-fps"
+            && let Some(hz) = boot.properties.display_hz
+        {
+            jfn_playback::ingest_driver::jfn_playback_set_display_hz(hz);
+        }
+        return BootEvent::Consumed;
+    }
     match event {
         jfn_mpv::api::WaitEvent::None => BootEvent::Idle,
         jfn_mpv::api::WaitEvent::LogMessage(m) => {
@@ -1162,14 +1163,6 @@ fn consume_boot_event(boot: &mut BackgroundCapture, event: jfn_mpv::api::WaitEve
         jfn_mpv::api::WaitEvent::Event(jfn_mpv::Event::Shutdown | jfn_mpv::Event::EndFile(_)) => {
             BootEvent::Fatal
         }
-        jfn_mpv::api::WaitEvent::Event(jfn_mpv::Event::GetPropertyReply {
-            reply: jfn_mpv::api::BACKGROUND_COLOR_REPLY,
-            ref value,
-            ..
-        }) => {
-            apply_startup_background(boot, value);
-            BootEvent::Consumed
-        }
         jfn_mpv::api::WaitEvent::Event(event) => {
             jfn_playback::ingest_driver::jfn_playback_ingest_mpv_event_owned(&event, plat());
             BootEvent::Consumed
@@ -1178,18 +1171,18 @@ fn consume_boot_event(boot: &mut BackgroundCapture, event: jfn_mpv::api::WaitEve
 }
 
 /// Applies the startup override and records the captured color as one state.
-fn apply_startup_background(boot: &mut BackgroundCapture, value: &jfn_mpv::PropertyValue) {
-    let user_video_bg = jfn_mpv::api::background_color_from_reply(value).unwrap_or(0);
+fn apply_startup_background(boot: &mut StartupCapture, user_video_bg: u32) {
     let startup_bg = cs(STARTUP_BG_HEX);
     unsafe { jfn_mpv::api::jfn_mpv_set_background_color_hex(startup_bg.as_ptr()) };
-    *boot = BackgroundCapture::Applied { user_video_bg };
+    boot.user_video_bg = Some(user_video_bg);
 }
 
-/// Produces startup evidence from the current window and captured background.
-fn boot_progress(boot: &BackgroundCapture) -> Option<ReadyBoot> {
-    let BackgroundCapture::Applied { user_video_bg } = boot else {
+/// Produces startup evidence from the current window and captured properties.
+fn boot_progress(boot: &StartupCapture) -> Option<ReadyBoot> {
+    if !boot.properties.is_complete() {
         return None;
-    };
+    }
+    let user_video_bg = boot.user_video_bg?;
     crate::window_geometry::controller()
         .source()
         .snapshot()
@@ -1198,7 +1191,8 @@ fn boot_progress(boot: &BackgroundCapture) -> Option<ReadyBoot> {
         return None;
     }
     Some(ReadyBoot {
-        user_video_bg: *user_video_bg,
+        user_video_bg,
+        demuxers: boot.properties.demuxers.clone(),
     })
 }
 
@@ -1269,11 +1263,10 @@ fn run_with_cef(
     opts: &StartupOptions,
     instance: &Instance,
 ) -> c_int {
-    let mpv_raw = resources.native.get().mpv.raw();
     if jfn_config::titlebar_theme_color() {
         plat().set_theme_color(0x101010);
     }
-    publish_device_profile(mpv_raw);
+    publish_device_profile(&boot.demuxers);
     if let Some(runtime) = deferred {
         let platform = &resources.native.get().platform;
         match initialize_cef(runtime, platform, opts) {
@@ -1312,9 +1305,33 @@ fn run_with_cef(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn boot_keeps_pumping_until_startup_properties_complete() {
+        let mut boot = StartupCapture {
+            user_video_bg: Some(0),
+            ..StartupCapture::default()
+        };
+        assert!(boot_progress(&boot).is_none());
+        for name in [
+            "background-color",
+            "demuxer-lavf-list",
+            "display-fps",
+            "mpv-version",
+        ] {
+            assert!(boot.properties.capture(&jfn_mpv::Event::GetPropertyReply {
+                reply: 1,
+                name: name.into(),
+                error: -10,
+                value: jfn_mpv::PropertyValue::None,
+            }));
+            assert!(boot_progress(&boot).is_none());
+        }
+    }
+
     #[test]
     fn fatal_boot_event_is_failure_and_only_requested_cancellation_succeeds() {
-        let mut boot = BackgroundCapture::Pending;
+        let mut boot = StartupCapture::default();
         assert!(matches!(
             consume_boot_event(
                 &mut boot,

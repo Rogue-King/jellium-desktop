@@ -5,8 +5,9 @@
 //! handle has not yet been initialized or has already been terminated.
 //!
 //! Property writes and commands go through libmpv's async API
-//! (`reply_userdata == 0`, fire-and-forget). Property reads are
-//! synchronous and must only be issued from non-event contexts; observed
+//! (`reply_userdata == 0`, fire-and-forget). Startup reads use
+//! [`StartupProperties`]; other property reads are synchronous and must
+//! not run on the macOS main thread or in mpv event callbacks. Observed
 //! properties should be read from the `jfn_playback_*` atomics instead.
 //!
 //! Stateful helpers — `LoadFile` / `ApplyPendingTrackSelectionAndPlay`
@@ -541,31 +542,113 @@ pub unsafe fn jfn_mpv_set_geometry(g: *const c_char) {
     unsafe { set_str(c"geometry", g) };
 }
 
-/// Reply id carried by the [`crate::Event::GetPropertyReply`] answering
-/// [`jfn_mpv_request_background_color`].
-pub const BACKGROUND_COLOR_REPLY: crate::event::ReplyUserdata = 1;
+const STARTUP_PROPERTY_REPLY: crate::event::ReplyUserdata = 1;
+const STARTUP_PROPERTIES: &[(&CStr, sys::mpv_format)] = &[
+    (c"background-color", sys::mpv_format::MPV_FORMAT_STRING),
+    (c"demuxer-lavf-list", sys::mpv_format::MPV_FORMAT_NODE),
+    (c"display-fps", sys::mpv_format::MPV_FORMAT_DOUBLE),
+    (c"mpv-version", sys::mpv_format::MPV_FORMAT_STRING),
+    (c"ffmpeg-version", sys::mpv_format::MPV_FORMAT_STRING),
+];
 
-/// Enqueues an async read of mpv's `background-color` on the core dispatch
-/// queue; never parks the caller on mpv's core lock. No-op without a live
-/// handle. The answer arrives as a `GetPropertyReply` tagged
-/// [`BACKGROUND_COLOR_REPLY`]; decode it with
-/// [`background_color_from_reply`].
-pub fn jfn_mpv_request_background_color() {
-    let h = raw();
-    if h.is_null() {
-        return;
-    }
-    unsafe {
-        sys::mpv_get_property_async(
-            h,
-            BACKGROUND_COLOR_REPLY,
-            c"background-color".as_ptr(),
-            sys::mpv_format::MPV_FORMAT_STRING,
-        )
-    };
+/// Startup reads must not hold the main thread waiting for mpv: its VO
+/// can synchronously dispatch window updates back to that same thread.
+pub struct StartupProperties {
+    pending: std::collections::HashSet<&'static CStr>,
+    pub background_color: Option<u32>,
+    pub demuxers: crate::Node,
+    pub display_hz: Option<f64>,
 }
 
-/// Packed 0x00RRGGBB parsed from a [`BACKGROUND_COLOR_REPLY`] payload.
+impl Default for StartupProperties {
+    fn default() -> Self {
+        Self {
+            pending: STARTUP_PROPERTIES.iter().map(|&(name, _)| name).collect(),
+            background_color: None,
+            demuxers: crate::Node::None,
+            display_hz: None,
+        }
+    }
+}
+
+impl StartupProperties {
+    /// Queue all reads; the caller must keep servicing native events and
+    /// feed replies to [`Self::capture`] until [`Self::is_complete`].
+    pub fn request(&self) -> crate::Result<()> {
+        let h = raw();
+        if h.is_null() {
+            return Err(crate::Error::new(-4));
+        }
+        for &(name, format) in STARTUP_PROPERTIES {
+            crate::error::check(unsafe {
+                sys::mpv_get_property_async(h, STARTUP_PROPERTY_REPLY, name.as_ptr(), format)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Failed replies also complete their read, retaining the same fallbacks
+    /// as unavailable synchronous properties. Ignore unrelated/duplicate replies.
+    pub fn capture(&mut self, event: &crate::Event) -> bool {
+        let crate::Event::GetPropertyReply {
+            reply: STARTUP_PROPERTY_REPLY,
+            name,
+            error,
+            value,
+        } = event
+        else {
+            return false;
+        };
+        let Some(&(property, _)) = STARTUP_PROPERTIES
+            .iter()
+            .find(|&&(property, _)| property.to_bytes() == name.as_bytes())
+        else {
+            return false;
+        };
+        if !self.pending.remove(property) {
+            return false;
+        }
+        let value = if *error < 0 {
+            tracing::warn!(target: "mpv", "startup read {name} failed: {error}");
+            &crate::PropertyValue::None
+        } else {
+            value
+        };
+        match name.as_str() {
+            "background-color" => {
+                self.background_color = Some(background_color_from_reply(value).unwrap_or(0));
+            }
+            "demuxer-lavf-list" => {
+                if let crate::PropertyValue::Node(node) = value {
+                    self.demuxers = node.clone();
+                }
+            }
+            "display-fps" => {
+                if let crate::PropertyValue::Double(hz) = value
+                    && hz.is_finite()
+                    && *hz > 0.0
+                {
+                    self.display_hz = Some(*hz);
+                }
+            }
+            "mpv-version" | "ffmpeg-version" => {
+                let version = match value {
+                    crate::PropertyValue::String(version) => version.as_str(),
+                    _ => "",
+                };
+                tracing::info!(target: "Main", "{name} {version}");
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
+/// Packed 0x00RRGGBB parsed from a background-color reply payload.
 /// `None` when the reply carried no string value.
 pub fn background_color_from_reply(value: &crate::PropertyValue) -> Option<u32> {
     match value {
@@ -579,4 +662,83 @@ pub unsafe fn jfn_mpv_set_background_color_hex(hex: *const c_char) {
         return;
     };
     unsafe { set_str(c"background-color", h) };
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::{Event, Node, PropertyValue};
+
+    fn reply(name: &str, value: PropertyValue) -> Event {
+        Event::GetPropertyReply {
+            reply: STARTUP_PROPERTY_REPLY,
+            name: name.into(),
+            error: 0,
+            value,
+        }
+    }
+
+    #[test]
+    fn startup_waits_for_all_async_replies_in_any_order() {
+        let mut properties = StartupProperties::default();
+        let demuxers = Node::Array(vec![Node::String("matroska".into())]);
+        for event in [
+            reply("ffmpeg-version", PropertyValue::String("ffmpeg".into())),
+            reply("display-fps", PropertyValue::Double(59.94)),
+            reply("background-color", PropertyValue::String("#123456".into())),
+            reply("demuxer-lavf-list", PropertyValue::Node(demuxers.clone())),
+        ] {
+            assert!(properties.capture(&event));
+            assert!(!properties.is_complete());
+        }
+        assert!(properties.capture(&reply("mpv-version", PropertyValue::String("mpv".into()))));
+        assert!(properties.is_complete());
+        assert_eq!(properties.background_color, Some(0x123456));
+        assert_eq!(properties.demuxers, demuxers);
+        assert_eq!(properties.display_hz, Some(59.94));
+    }
+
+    #[test]
+    fn failed_startup_reads_complete_with_safe_fallbacks() {
+        let mut properties = StartupProperties::default();
+        for &(name, _) in STARTUP_PROPERTIES {
+            let event = Event::GetPropertyReply {
+                reply: STARTUP_PROPERTY_REPLY,
+                name: name.to_string_lossy().into_owned(),
+                error: -10,
+                value: PropertyValue::String("ignored on error".into()),
+            };
+            assert!(properties.capture(&event));
+        }
+        assert!(properties.is_complete());
+        assert_eq!(properties.background_color, Some(0));
+        assert_eq!(properties.demuxers, Node::None);
+        assert_eq!(properties.display_hz, None);
+    }
+
+    #[test]
+    fn unrelated_and_duplicate_replies_do_not_advance_startup() {
+        let mut properties = StartupProperties::default();
+        assert!(!properties.capture(&Event::Shutdown));
+        assert!(!properties.capture(&reply("unrelated", PropertyValue::None)));
+        let mut wrong_id = reply("mpv-version", PropertyValue::None);
+        if let Event::GetPropertyReply { reply, .. } = &mut wrong_id {
+            *reply = STARTUP_PROPERTY_REPLY + 1;
+        }
+        assert!(!properties.capture(&wrong_id));
+        assert_eq!(properties.pending.len(), STARTUP_PROPERTIES.len());
+        assert!(properties.capture(&reply("background-color", PropertyValue::None)));
+        assert!(!properties.capture(&reply("background-color", PropertyValue::None)));
+        assert_eq!(properties.pending.len(), STARTUP_PROPERTIES.len() - 1);
+        assert!(!properties.is_complete());
+    }
+
+    #[test]
+    fn invalid_refresh_rates_do_not_seed_display_timing() {
+        for hz in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut properties = StartupProperties::default();
+            assert!(properties.capture(&reply("display-fps", PropertyValue::Double(hz))));
+            assert_eq!(properties.display_hz, None);
+        }
+    }
 }

@@ -46,6 +46,15 @@ pub struct Capabilities {
     pub demuxers: Vec<String>,
 }
 
+/// Build capabilities from an asynchronously captured `demuxer-lavf-list`.
+/// Decoder enumeration only accesses libavcodec, never mpv's core lock.
+pub fn from_demuxer_node(demuxers: &Node) -> Capabilities {
+    Capabilities {
+        decoders: enumerate_decoders(),
+        demuxers: parse_string_list(demuxers),
+    }
+}
+
 pub fn query(handle: Option<&Handle>) -> Capabilities {
     unsafe { query_raw(handle.map(|h| h.raw()).unwrap_or(std::ptr::null_mut())) }
 }
@@ -55,7 +64,8 @@ pub fn query(handle: Option<&Handle>) -> Capabilities {
 ///
 /// # Safety
 /// `raw`, if non-NULL, must point to a live `mpv_handle` for the
-/// duration of the call. Reads `demuxer-lavf-list` via `mpv_get_property`.
+/// duration of the call. Reads `demuxer-lavf-list` via `mpv_get_property`;
+/// never call on the macOS main thread or from mpv event callbacks.
 pub unsafe fn query_raw(raw: *mut sys::mpv_handle) -> Capabilities {
     let mut caps = Capabilities {
         decoders: enumerate_decoders(),
@@ -152,6 +162,18 @@ mod tests {
             Node::String(String::new()),
         ]);
         assert_eq!(parse_string_list(&arr), vec!["mp4", "mkv"]);
+    }
+
+    #[test]
+    fn async_demuxer_snapshot_preserves_decoder_capabilities() {
+        let demuxers = Node::Array(vec![Node::String("matroska".into())]);
+        let caps = from_demuxer_node(&demuxers);
+        assert_eq!(caps.demuxers, vec!["matroska"]);
+        assert_eq!(caps.decoders, enumerate_decoders());
+
+        let unavailable = from_demuxer_node(&Node::None);
+        assert!(unavailable.demuxers.is_empty());
+        assert_eq!(unavailable.decoders, caps.decoders);
     }
 
     #[test]
