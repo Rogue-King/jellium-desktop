@@ -1,5 +1,5 @@
 //! App connection state, owned and updated by the shell actor.
-use jfn_cef::Navigation;
+use jfn_cef::{ConnectionError, Navigation};
 use std::time::{Duration, Instant};
 pub(crate) const SPINNER_FLOOR: Duration = Duration::from_secs(1);
 pub(crate) const FADE: Duration = Duration::from_millis(500);
@@ -31,8 +31,8 @@ pub enum Screen {
     Form { url: String },
     /// The logo and spinner, up since `since`.
     Working { since: Instant },
-    /// The failure view.
-    Failed,
+    /// The failure view, including its cause and recovery guidance.
+    Failed { error: ConnectionError },
     /// The witness arrived; the screen fades from `fade_from`.
     Retiring { fade_from: Instant },
     /// The connection screen is no longer needed.
@@ -43,13 +43,12 @@ pub enum Screen {
 enum Phase {
     /// No probe in flight; the form shows `url`.
     Editing { url: String },
-    /// Probe `cycle` is resolving `url`. `unresolved` holds a failure the
-    /// spinner floor has not yet let show.
+    /// Probe `cycle` is resolving `url`. `failure` waits for the spinner floor.
     Probing {
         url: String,
         cycle: u64,
         since: Instant,
-        unresolved: bool,
+        failure: Option<ConnectionError>,
     },
     /// `navigation` is loading and no frame produced after it has been
     /// presented.
@@ -59,7 +58,7 @@ enum Phase {
         since: Instant,
     },
     /// The probe or the navigation failed; `url` is what the form returns to.
-    Failed { url: String },
+    Failed { url: String, error: ConnectionError },
     /// The witness arrived; the connect screen is fading out.
     Retiring {
         navigation: Navigation,
@@ -116,14 +115,14 @@ impl Connection {
                 Request::Probe { cycle, url } => {
                     let delivered = overlay.probe(cycle, &url);
                     if delivered.is_err() {
-                        self.probe_failed(cycle);
+                        self.probe_failed(cycle, jfn_cef::ConnectionError::Unavailable);
                     }
                     delivered
                 }
                 Request::Navigate { navigation, url } => {
                     let delivered = overlay.navigate(navigation, &url);
                     if delivered.is_err() {
-                        self.navigation_failed(navigation);
+                        self.navigation_failed(navigation, jfn_cef::ConnectionError::Unavailable);
                     }
                     delivered
                 }
@@ -173,7 +172,7 @@ impl Connection {
             url: url.clone(),
             cycle,
             since: Instant::now(),
-            unresolved: false,
+            failure: None,
         });
         self.requests.push(Request::Probe { cycle, url });
     }
@@ -198,6 +197,17 @@ impl Connection {
             navigation,
             url: base,
         });
+    }
+
+    pub(crate) fn disconnect(&mut self) {
+        jfn_playback::jfn_playback_stop();
+        self.enter(Phase::Editing { url: String::new() });
+    }
+
+    pub(crate) fn switch_server(&mut self, url: String) {
+        self.disconnect();
+        self.edit_url(url);
+        self.connect();
     }
 
     pub(crate) fn edit_url(&mut self, url: String) {
@@ -228,7 +238,7 @@ impl Connection {
         }
     }
     pub(crate) fn dismiss_failure(&mut self) {
-        if let Phase::Failed { url } = &self.phase {
+        if let Phase::Failed { url, .. } = &self.phase {
             let url = url.clone();
             self.enter(Phase::Editing { url });
         }
@@ -238,24 +248,24 @@ impl Connection {
             self.navigate(base);
         }
     }
-    pub(crate) fn probe_failed(&mut self, cycle: u64) {
+    pub(crate) fn probe_failed(&mut self, cycle: u64, error: ConnectionError) {
         if let Phase::Probing {
             url,
             cycle: live,
             since,
-            unresolved,
+            failure,
         } = &mut self.phase
             && *live == cycle
         {
             if Instant::now().saturating_duration_since(*since) < SPINNER_FLOOR {
-                *unresolved = true;
+                *failure = Some(error);
             } else {
                 let url = url.clone();
-                self.enter(Phase::Failed { url });
+                self.enter(Phase::Failed { url, error });
             }
         }
     }
-    pub(crate) fn navigation_failed(&mut self, navigation: Navigation) {
+    pub(crate) fn navigation_failed(&mut self, navigation: Navigation, error: ConnectionError) {
         if let Phase::Loading {
             base,
             navigation: live,
@@ -264,7 +274,7 @@ impl Connection {
             && *live == navigation
         {
             let url = base.clone();
-            self.enter(Phase::Failed { url });
+            self.enter(Phase::Failed { url, error });
         }
     }
     pub(crate) fn frame_presented(&mut self, presented: jfn_cef::NavigationPresented) {
@@ -290,11 +300,12 @@ impl Connection {
             Phase::Probing {
                 url,
                 since,
-                unresolved: true,
+                failure: Some(error),
                 ..
             } if now.saturating_duration_since(*since) >= SPINNER_FLOOR => {
                 let url = url.clone();
-                self.enter(Phase::Failed { url });
+                let error = error.clone();
+                self.enter(Phase::Failed { url, error });
             }
             Phase::Retiring {
                 navigation,
@@ -313,7 +324,9 @@ impl Connection {
             Phase::Probing { since, .. } | Phase::Loading { since, .. } => {
                 Screen::Working { since: *since }
             }
-            Phase::Failed { .. } => Screen::Failed,
+            Phase::Failed { error, .. } => Screen::Failed {
+                error: error.clone(),
+            },
             Phase::Retiring { fade_from, .. } => Screen::Retiring {
                 fade_from: *fade_from,
             },
@@ -325,7 +338,7 @@ impl Connection {
         match &self.phase {
             Phase::Probing {
                 since,
-                unresolved: true,
+                failure: Some(_),
                 ..
             } => Some(*since + SPINNER_FLOOR),
             Phase::Retiring { fade_from, .. } => Some(*fade_from + FADE),
@@ -370,7 +383,7 @@ mod tests {
             [Request::Probe { .. }, Request::CancelProbe]
         ));
         connection.probe_resolved(cycle, "https://stale".into());
-        connection.probe_failed(cycle);
+        connection.probe_failed(cycle, jfn_cef::ConnectionError::Unavailable);
         assert!(matches!(connection.screen(), Screen::Form { .. }));
     }
 
@@ -384,13 +397,10 @@ mod tests {
         };
         assert_ne!(old, cycle);
         connection.probe_resolved(old, "https://stale".into());
-        connection.probe_failed(old);
+        connection.probe_failed(old, jfn_cef::ConnectionError::Unavailable);
         assert!(matches!(
             connection.phase,
-            Phase::Probing {
-                unresolved: false,
-                ..
-            }
+            Phase::Probing { failure: None, .. }
         ));
         assert!(connection.deadline().is_none());
     }
@@ -398,11 +408,16 @@ mod tests {
     #[test]
     fn probe_failure_waits_for_spinner_floor_then_restores_the_url() {
         let (mut connection, cycle, since) = probing();
-        connection.probe_failed(cycle);
+        connection.probe_failed(cycle, jfn_cef::ConnectionError::Unavailable);
         assert!(matches!(connection.screen(), Screen::Working { .. }));
         assert_eq!(connection.deadline(), Some(since + SPINNER_FLOOR));
         connection.tick(since + SPINNER_FLOOR);
-        assert!(matches!(connection.screen(), Screen::Failed));
+        assert!(matches!(
+            connection.screen(),
+            Screen::Failed {
+                error: ConnectionError::Unavailable
+            }
+        ));
         connection.dismiss_failure();
         assert!(
             matches!(connection.screen(), Screen::Form { url } if url == "https://server/jellyfin")
@@ -414,12 +429,12 @@ mod tests {
         for cancel in [true, false] {
             let id = Navigation::new(1);
             let mut connection = loading(id);
-            connection.navigation_failed(Navigation::new(2));
+            connection.navigation_failed(Navigation::new(2), jfn_cef::ConnectionError::Unavailable);
             assert!(matches!(connection.phase, Phase::Loading { .. }));
             if cancel {
                 connection.cancel();
             } else {
-                connection.navigation_failed(id);
+                connection.navigation_failed(id, jfn_cef::ConnectionError::Unavailable);
             }
             assert!(
                 matches!(connection.requests.as_slice(), [Request::Abandon { navigation }] if *navigation == id)
@@ -427,9 +442,40 @@ mod tests {
             assert!(!connection.finish_navigation(id, Instant::now()));
             assert!(matches!(
                 connection.screen(),
-                Screen::Form { .. } | Screen::Failed
+                Screen::Form { .. } | Screen::Failed { .. }
             ));
         }
+    }
+
+    #[test]
+    fn switching_servers_abandons_the_old_document_and_reprobes_the_selected_url() {
+        let previous = Navigation::new(1);
+        let mut connection = loading(previous);
+        connection.switch_server("https://second/jellyfin".into());
+        assert!(
+            matches!(connection.phase, Phase::Probing { ref url, .. } if url == "https://second/jellyfin")
+        );
+        assert!(
+            matches!(connection.requests.as_slice(), [Request::Abandon { navigation }, Request::Probe { url, .. }] if *navigation == previous && url == "https://second/jellyfin")
+        );
+        assert!(!connection.finish_navigation(previous, Instant::now()));
+    }
+
+    #[test]
+    fn failure_details_survive_the_spinner_and_retry_keeps_the_address() {
+        let (mut connection, cycle, since) = probing();
+        connection.probe_failed(cycle, ConnectionError::Dns);
+        connection.tick(since + SPINNER_FLOOR);
+        assert!(matches!(
+            connection.screen(),
+            Screen::Failed {
+                error: ConnectionError::Dns
+            }
+        ));
+        connection.connect();
+        assert!(
+            matches!(connection.phase, Phase::Probing { url, failure: None, .. } if url == "https://server/jellyfin")
+        );
     }
 
     #[test]

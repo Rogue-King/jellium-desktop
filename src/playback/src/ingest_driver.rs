@@ -217,6 +217,31 @@ pub fn jfn_playback_observe_mpv_properties(backend: u8) -> bool {
         ),
         (CORE_IDLE, c"core-idle", mpv_format::MPV_FORMAT_FLAG),
         (
+            VIDEO_CODEC,
+            c"current-tracks/video/codec",
+            mpv_format::MPV_FORMAT_STRING,
+        ),
+        (
+            AUDIO_CODEC,
+            c"current-tracks/audio/codec",
+            mpv_format::MPV_FORMAT_STRING,
+        ),
+        (
+            HWDEC_CURRENT,
+            c"hwdec-current",
+            mpv_format::MPV_FORMAT_STRING,
+        ),
+        (
+            DROPPED_FRAMES,
+            c"frame-drop-count",
+            mpv_format::MPV_FORMAT_INT64,
+        ),
+        (
+            DECODER_DROPPED_FRAMES,
+            c"decoder-frame-drop-count",
+            mpv_format::MPV_FORMAT_INT64,
+        ),
+        (
             VIDEO_FRAME_INFO,
             c"video-frame-info",
             mpv_format::MPV_FORMAT_NODE,

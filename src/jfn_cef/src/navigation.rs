@@ -26,8 +26,14 @@ impl NavigationPresented {
 
 #[derive(Clone, Debug)]
 pub enum WebEvent {
-    ProbeFinished { cycle: u64, base: Option<String> },
-    NavigationFailed(Navigation),
+    ProbeFinished {
+        cycle: u64,
+        result: Result<String, crate::ConnectionError>,
+    },
+    NavigationFailed {
+        navigation: Navigation,
+        error: crate::ConnectionError,
+    },
     FramePresented(NavigationPresented),
 }
 /// Called from CEF callbacks; handlers should enqueue work and return promptly.

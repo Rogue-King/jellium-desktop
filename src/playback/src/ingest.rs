@@ -12,11 +12,11 @@
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use crossbeam_utils::atomic::AtomicCell;
-use jfn_mpv::{Event, ObserveId, PropertyValue};
+use jfn_mpv::{Event, Node, ObserveId, PropertyValue};
 use jfn_platform_abi::{LogicalSize, PhysicalSize, Scale, WindowExtent};
 
 use crate::coordinator::Input;
-use crate::types::{EndReason, PlaybackBufferedRange};
+use crate::types::{EndReason, PlaybackBufferedRange, PlaybackDiagnostic};
 
 /// Property observe-IDs passed to `mpv_observe_property`.
 pub mod observe_id {
@@ -34,6 +34,11 @@ pub mod observe_id {
     pub const CORE_IDLE: u64 = 14;
     pub const VIDEO_FRAME_INFO: u64 = 15;
     pub const WINDOW_ID: u64 = 16;
+    pub const VIDEO_CODEC: u64 = 17;
+    pub const AUDIO_CODEC: u64 = 18;
+    pub const HWDEC_CURRENT: u64 = 19;
+    pub const DROPPED_FRAMES: u64 = 20;
+    pub const DECODER_DROPPED_FRAMES: u64 = 21;
 }
 
 const MAX_BUFFERED_RANGES: usize = 8;
@@ -151,23 +156,15 @@ pub(crate) fn ingest<C: IngestCtx>(event: &Event, state: &IngestState, ctx: &C) 
 
 fn end_file_input(reason: &jfn_mpv::EndFileReason) -> Input {
     use jfn_mpv::EndFileReason as R;
-    match reason {
-        R::Eof | R::Redirect => Input::EndFile {
-            reason: EndReason::Eof,
-            error_message: String::new(),
-        },
-        R::Stop | R::Quit => Input::EndFile {
-            reason: EndReason::Canceled,
-            error_message: String::new(),
-        },
-        R::Error(e) => Input::EndFile {
-            reason: EndReason::Error,
-            error_message: e.to_string(),
-        },
-        R::Unknown(_) => Input::EndFile {
-            reason: EndReason::Canceled,
-            error_message: String::new(),
-        },
+    let (reason, error_message, error_code) = match reason {
+        R::Eof | R::Redirect => (EndReason::Eof, String::new(), None),
+        R::Error(error) => (EndReason::Error, error.to_string(), Some(error.code)),
+        R::Stop | R::Quit | R::Unknown(_) => (EndReason::Canceled, String::new(), None),
+    };
+    Input::EndFile {
+        reason,
+        error_message,
+        error_code,
     }
 }
 
@@ -241,6 +238,27 @@ fn digest_property<C: IngestCtx>(
             vec![IngestOut::Input(Input::DisplayHz(fps))]
         }
         CACHE_STATE => digest_cache_state(value),
+        VIDEO_CODEC | AUDIO_CODEC | HWDEC_CURRENT => {
+            let text = match value {
+                PropertyValue::String(text) if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            };
+            let update = match id {
+                VIDEO_CODEC => PlaybackDiagnostic::VideoCodec(text),
+                AUDIO_CODEC => PlaybackDiagnostic::AudioCodec(text),
+                _ => PlaybackDiagnostic::HardwareDecoding(text),
+            };
+            vec![IngestOut::Input(Input::Diagnostic(update))]
+        }
+        DROPPED_FRAMES | DECODER_DROPPED_FRAMES => {
+            let count = as_int(value).filter(|v| *v >= 0);
+            let update = if id == DROPPED_FRAMES {
+                PlaybackDiagnostic::DroppedFrames(count)
+            } else {
+                PlaybackDiagnostic::DecoderDroppedFrames(count)
+            };
+            vec![IngestOut::Input(Input::Diagnostic(update))]
+        }
         _ => Vec::new(),
     }
 }
@@ -292,25 +310,40 @@ pub(crate) fn extent_of(scale: Scale, physical: PhysicalSize) -> Option<WindowEx
 }
 
 fn digest_cache_state(value: &PropertyValue) -> Vec<IngestOut> {
-    let PropertyValue::Node(node) = value else {
-        return Vec::new();
+    let node = match value {
+        PropertyValue::Node(node) => Some(node),
+        _ => None,
     };
-    let Some(arr) = node.get("seekable-ranges").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    let mut ranges = Vec::with_capacity(arr.len().min(MAX_BUFFERED_RANGES));
-    for range in arr.iter().take(MAX_BUFFERED_RANGES) {
-        let start = range
-            .get("start")
-            .and_then(|v| v.as_double())
-            .unwrap_or(0.0);
-        let end = range.get("end").and_then(|v| v.as_double()).unwrap_or(0.0);
-        ranges.push(PlaybackBufferedRange {
-            start_ticks: (start * 10_000_000.0) as i64,
-            end_ticks: (end * 10_000_000.0) as i64,
-        });
-    }
-    vec![IngestOut::Input(Input::BufferedRanges(ranges))]
+    let ranges = node
+        .and_then(|n| n.get("seekable-ranges"))
+        .and_then(Node::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_BUFFERED_RANGES)
+        .filter_map(|range| {
+            let start = range.get("start").and_then(Node::as_double)?;
+            let end = range.get("end").and_then(Node::as_double)?;
+            (start.is_finite() && end.is_finite() && end >= start).then_some(
+                PlaybackBufferedRange {
+                    start_ticks: (start * 10_000_000.0) as i64,
+                    end_ticks: (end * 10_000_000.0) as i64,
+                },
+            )
+        })
+        .collect();
+    vec![
+        IngestOut::Input(Input::BufferedRanges(ranges)),
+        IngestOut::Input(Input::Diagnostic(PlaybackDiagnostic::Cache {
+            duration: node
+                .and_then(|n| n.get("cache-duration"))
+                .and_then(Node::as_double),
+            bytes: node.and_then(|n| n.get("fw-bytes")).and_then(Node::as_int),
+            input_bytes_per_second: node
+                .and_then(|n| n.get("raw-input-rate"))
+                .and_then(Node::as_int)
+                .map(|rate| rate as f64),
+        })),
+    ]
 }
 
 fn as_flag(v: &PropertyValue) -> Option<bool> {
@@ -639,6 +672,53 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].start_ticks, 0);
         assert_eq!(r[0].end_ticks, 25_000_000);
+    }
+
+    #[test]
+    fn diagnostics_keep_zero_counts_and_clear_unavailable_properties() {
+        let state = IngestState::new();
+        for (value, expected) in [
+            (PropertyValue::Int(0), Some(0)),
+            (PropertyValue::None, None),
+        ] {
+            let out = ingest(
+                &prop(observe_id::DROPPED_FRAMES, value),
+                &state,
+                &ctx(Scale::ONE),
+            );
+            assert!(
+                matches!(out.as_slice(), [IngestOut::Input(Input::Diagnostic(PlaybackDiagnostic::DroppedFrames(v)))] if *v == expected)
+            );
+        }
+        let out = digest_cache_state(&PropertyValue::None);
+        assert!(
+            matches!(&out[0], IngestOut::Input(Input::BufferedRanges(ranges)) if ranges.is_empty())
+        );
+        assert!(matches!(
+            &out[1],
+            IngestOut::Input(Input::Diagnostic(PlaybackDiagnostic::Cache {
+                duration: None,
+                bytes: None,
+                input_bytes_per_second: None
+            }))
+        ));
+    }
+
+    #[test]
+    fn cache_diagnostics_use_reported_values_without_seekable_ranges() {
+        let out = digest_cache_state(&PropertyValue::Node(Node::Map(vec![
+            ("cache-duration".into(), Node::Double(2.5)),
+            ("fw-bytes".into(), Node::Int(4096)),
+            ("raw-input-rate".into(), Node::Int(512)),
+        ])));
+        assert!(matches!(
+            &out[1],
+            IngestOut::Input(Input::Diagnostic(PlaybackDiagnostic::Cache {
+                duration: Some(2.5),
+                bytes: Some(4096),
+                input_bytes_per_second: Some(512.0)
+            }))
+        ));
     }
 
     #[test]

@@ -31,7 +31,7 @@ pub fn execute(cmd: MediaCommand) {
         MediaCommand::Play => jfn_mpv::api::jfn_mpv_play(),
         MediaCommand::Pause => jfn_mpv::api::jfn_mpv_pause(),
         MediaCommand::PlayPause => jfn_mpv::api::jfn_mpv_toggle_pause(),
-        MediaCommand::Stop => jfn_mpv::api::jfn_mpv_stop(),
+        MediaCommand::Stop => crate::jfn_playback_stop(),
         MediaCommand::Next => {
             crate::exec_js::call("if(window._nativeHostInput) window._nativeHostInput(['next']);")
         }

@@ -57,7 +57,16 @@ impl Inner {
             &formatted,
         );
         if is_main {
-            self.note_main_frame_loaded(url);
+            if code >= 400 {
+                if let Some(navigation) = self.load_navigation(url) {
+                    self.report_web_event(crate::WebEvent::NavigationFailed {
+                        navigation,
+                        error: crate::ConnectionError::Http(code),
+                    });
+                }
+            } else {
+                self.note_main_frame_loaded(url);
+            }
         }
     }
 
@@ -80,7 +89,10 @@ impl Inner {
             && code != ERR_ABORTED
             && let Some(navigation) = self.load_navigation(url)
         {
-            self.report_web_event(crate::WebEvent::NavigationFailed(navigation));
+            self.report_web_event(crate::WebEvent::NavigationFailed {
+                navigation,
+                error: crate::ConnectionError::from_cef(code),
+            });
         }
     }
 

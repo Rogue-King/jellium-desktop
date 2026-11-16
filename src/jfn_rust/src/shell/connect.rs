@@ -19,12 +19,17 @@ use crate::shell::lang::strings;
 use crate::shell::theme::{self, Theme};
 
 pub const URL_FIELD: Id = Id::new("shell-connect-url");
+pub const SAVED_SERVER_CONTROL: Id = Id::new("shell-connect-saved-server");
+pub const CONNECT_CONTROL: Id = Id::new("shell-connect-submit");
+pub const RETRY_CONTROL: Id = Id::new("shell-connect-retry");
+pub const EDIT_ADDRESS_CONTROL: Id = Id::new("shell-connect-edit-address");
 
 #[derive(Clone, Debug)]
 pub enum Message {
     UrlEdited(String),
     Submit,
     DismissFailure,
+    SavedServerSelected(Option<jfn_config::SavedServer>),
 }
 
 pub struct Connect {
@@ -50,7 +55,7 @@ impl Connect {
         screen: &'a Screen,
     ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
         let body: Element<'a, Message, Theme, iced_wgpu::Renderer> = match screen {
-            Screen::Failed => self.failure_view(),
+            Screen::Failed { error } => self.failure_view(error),
             Screen::Working { .. } | Screen::Retiring { .. } => self.spinner_view(screen),
             Screen::Form { url } => self.form_view(url),
             Screen::Gone => iced_widget::space::horizontal().boxed(),
@@ -67,7 +72,7 @@ impl Connect {
 
     fn form_view<'a>(&'a self, url: &'a str) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
         let submit = (!url.trim().is_empty()).then_some(Message::Submit);
-        column![
+        let mut form = column![
             image(crate::shell::logo::handle())
                 .width(Length::Fixed(crate::shell::logo::CONNECT_WIDTH)),
             text(strings().server_host).size(24),
@@ -76,15 +81,39 @@ impl Connect {
                 .on_submit(Message::Submit)
                 .padding(Padding::from([10, 13]))
                 .size(16),
-            button(text(strings().connect).center())
-                .on_press_maybe(submit)
-                .width(Length::Fill)
-                .padding(Padding::from([12, 24])),
+            crate::shell::controls::action(
+                CONNECT_CONTROL,
+                button(text(strings().connect).center())
+                    .on_press_maybe(submit)
+                    .width(Length::Fill)
+                    .padding(Padding::from([12, 24])),
+                Message::Submit,
+            ),
         ]
         .spacing(16)
         .width(Length::Fixed(450.0))
-        .align_x(Alignment::Center)
-        .boxed()
+        .align_x(Alignment::Center);
+        let servers = jfn_config::saved_servers();
+        if !servers.is_empty() {
+            let selected = servers
+                .iter()
+                .find(|server| server.url == url.trim_end_matches('/'))
+                .cloned();
+            form = form.push(crate::shell::controls::select(
+                SAVED_SERVER_CONTROL,
+                selected,
+                std::iter::once(None)
+                    .chain(servers.into_iter().map(Some))
+                    .collect(),
+                |server: &Option<jfn_config::SavedServer>| {
+                    server
+                        .as_ref()
+                        .map_or_else(|| "Choose a saved server".to_owned(), ToString::to_string)
+                },
+                Message::SavedServerSelected,
+            ));
+        }
+        form.boxed()
     }
 
     fn spinner_view(&self, screen: &Screen) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
@@ -105,13 +134,25 @@ impl Connect {
         .boxed()
     }
 
-    fn failure_view(&self) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
+    fn failure_view(
+        &self,
+        error: &jfn_cef::ConnectionError,
+    ) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
         column![
             text(strings().connection_failure).size(24),
-            container(text(strings().unable_to_connect).center())
+            container(text(error.to_string()).center())
                 .width(Length::Fixed(350.0))
                 .padding(Padding::from([0, 24])),
-            button(text(strings().got_it).center()).on_press(Message::DismissFailure),
+            crate::shell::controls::action(
+                RETRY_CONTROL,
+                button(text("Retry").center()).on_press(Message::Submit),
+                Message::Submit
+            ),
+            crate::shell::controls::action(
+                EDIT_ADDRESS_CONTROL,
+                button(text("Edit address").center()).on_press(Message::DismissFailure),
+                Message::DismissFailure
+            ),
         ]
         .spacing(32)
         .align_x(Alignment::Center)
@@ -139,7 +180,11 @@ impl Connect {
     /// The URL field, for the caller to focus after every widget-tree rebuild.
     /// `None` once the field is gone.
     pub fn focus_target(&self, screen: &Screen) -> Option<Id> {
-        matches!(screen, Screen::Form { .. }).then_some(URL_FIELD)
+        match screen {
+            Screen::Form { .. } => Some(URL_FIELD),
+            Screen::Failed { .. } => Some(RETRY_CONTROL),
+            _ => None,
+        }
     }
 }
 

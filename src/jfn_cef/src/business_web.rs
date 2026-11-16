@@ -18,7 +18,7 @@ use jfn_mpv::api::{
     jfn_mpv_audio_add, jfn_mpv_load_file, jfn_mpv_pause, jfn_mpv_play, jfn_mpv_seek_absolute,
     jfn_mpv_set_aspect_mode, jfn_mpv_set_audio_delay, jfn_mpv_set_audio_track, jfn_mpv_set_muted,
     jfn_mpv_set_speed, jfn_mpv_set_subtitle_delay, jfn_mpv_set_subtitle_track, jfn_mpv_set_volume,
-    jfn_mpv_stop, jfn_mpv_sub_add,
+    jfn_mpv_sub_add,
 };
 use jfn_mpv::boot::jfn_mpv_handle_get;
 use jfn_playback::ingest_driver::jfn_playback_fullscreen;
@@ -229,7 +229,7 @@ fn handle_message(message: BrowserMessage) -> bool {
     match message.name() {
         "playerLoad" => with_args(args, handle_player_load),
         "playerStop" => {
-            jfn_mpv_stop();
+            jfn_playback::jfn_playback_stop();
             true
         }
         "playerPause" => {

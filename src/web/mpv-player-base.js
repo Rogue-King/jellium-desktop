@@ -29,13 +29,18 @@
                     this.events.trigger(this, 'pause');
                 },
                 onDuration: (duration) => { this._duration = duration; },
-                onError: (error) => {
-                    console.error(`[Media] [${this.logTag}] media error:`, error);
-                    this.events.trigger(this, 'error', [{ type: 'mediadecodeerror' }]);
-                }
+                onError: (error) => { this.reportError(error); }
             };
 
             this.setVolume(this.getSavedVolume() * 100, false);
+        }
+
+        reportError(error) {
+            const details = error && typeof error === 'object'
+                ? error
+                : { type: 'PLAYER_ERROR', message: String(error || 'Playback failed') };
+            console.error(`[Media] [${this.logTag}] media error:`, details);
+            this.events.trigger(this, 'error', [details]);
         }
 
         // Signal management

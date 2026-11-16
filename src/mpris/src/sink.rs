@@ -445,7 +445,8 @@ fn handle_event(
             PlaybackEventKind::MediaTypeChanged
             | PlaybackEventKind::FullscreenChanged
             | PlaybackEventKind::BufferedRangesChanged
-            | PlaybackEventKind::DisplayHzChanged => {}
+            | PlaybackEventKind::DisplayHzChanged
+            | PlaybackEventKind::DiagnosticsChanged => {}
         }
     }
 

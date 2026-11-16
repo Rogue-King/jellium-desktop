@@ -22,6 +22,10 @@ pub const DEVICE_NAME_FIELD: Id = Id::new("shell-settings-device-name");
 pub const LOG_LEVEL_CONTROL: Id = Id::new("shell-settings-log-level");
 pub const OPEN_MPV_CONFIG_CONTROL: Id = Id::new("shell-settings-open-mpv-config");
 pub const RESET_SERVER_CONTROL: Id = Id::new("shell-settings-reset-server");
+pub const SERVER_PICKER_CONTROL: Id = Id::new("shell-settings-server-picker");
+pub const SERVER_NAME_FIELD: Id = Id::new("shell-settings-server-name");
+pub const CONNECT_SERVER_CONTROL: Id = Id::new("shell-settings-connect-server");
+pub const FORGET_SERVER_CONTROL: Id = Id::new("shell-settings-forget-server");
 
 pub const TITLE: &str = "Settings";
 pub const CLOSE_LABEL: &str = "Close Settings";
@@ -51,13 +55,19 @@ pub enum Message {
     LogLevelChanged(String),
     OpenMpvConfigDirectory,
     ResetSavedServer,
+    ServerSelected(Option<jfn_config::SavedServer>),
+    ServerNameEdited(String),
+    CommitServerName,
+    ConnectSelectedServer,
+    ForgetSelectedServer,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Outcome {
     None,
     Dismiss,
     ResetSavedServer,
+    ConnectServer(String),
 }
 
 pub struct Settings {
@@ -66,6 +76,9 @@ pub struct Settings {
     pub device_name_default: String,
     server_available: bool,
     decoration_options: Vec<Option<WindowDecorations>>,
+    servers: Vec<jfn_config::SavedServer>,
+    selected_server: Option<jfn_config::SavedServer>,
+    server_name: String,
 }
 
 impl Default for Settings {
@@ -83,7 +96,21 @@ impl Settings {
                 platform.window_decoration_options().iter(),
             )
         });
+        let servers = jfn_config::saved_servers();
+        let current = jfn_config::server_url();
+        let selected_server = servers
+            .iter()
+            .find(|server| server.url == current.trim_end_matches('/'))
+            .or(servers.first())
+            .cloned();
+        let server_name = selected_server
+            .as_ref()
+            .map(|server| server.name.clone())
+            .unwrap_or_default();
         Self {
+            servers,
+            selected_server,
+            server_name,
             audio_passthrough: jfn_config::audio_passthrough(),
             device_name: jfn_config::device_name(),
             device_name_default: jfn_config::default_device_name(),
@@ -98,7 +125,7 @@ impl Settings {
         let log_level = jfn_config::log_level();
 
         let mut controls = column![
-            text("Changes take effect after restarting the application.").class(Some(theme::MUTED)),
+            text("Playback and appearance changes require restarting. Server changes apply immediately.").class(Some(theme::MUTED)),
             self.group(SECTION_TITLES[0], column![self.selection(
                 "Hardware Decoding",
                 controls::select(
@@ -208,24 +235,62 @@ impl Settings {
             ));
         controls = controls.push(self.group(SECTION_TITLES[3], advanced));
         if self.server_available {
-            controls = controls
-                .push(self.group(
-                    SECTION_TITLES[4],
-                    column![self.action(
-                        OPEN_MPV_CONFIG_CONTROL,
-                        "Open mpv config directory",
-                        Message::OpenMpvConfigDirectory,
-                    )],
-                ))
-                .push(self.group(
-                    SECTION_TITLES[5],
-                    column![self.action(
-                        RESET_SERVER_CONTROL,
-                        "Reset Saved Server",
-                        Message::ResetSavedServer,
-                    )],
-                ));
+            controls = controls.push(self.group(
+                SECTION_TITLES[4],
+                column![self.action(
+                    OPEN_MPV_CONFIG_CONTROL,
+                    "Open mpv config directory",
+                    Message::OpenMpvConfigDirectory
+                )],
+            ));
         }
+        let mut servers = column![controls::select(
+            SERVER_PICKER_CONTROL,
+            self.selected_server.clone(),
+            std::iter::once(None)
+                .chain(self.servers.iter().cloned().map(Some))
+                .collect(),
+            |server: &Option<jfn_config::SavedServer>| server
+                .as_ref()
+                .map_or_else(|| "Choose a saved server".to_owned(), ToString::to_string),
+            Message::ServerSelected,
+        )];
+        if let Some(server) = &self.selected_server {
+            let forget = if server.url == jfn_config::server_url().trim_end_matches('/') {
+                "Forget and disconnect"
+            } else {
+                "Forget saved server"
+            };
+            servers = servers
+                .push(
+                    self.setting(
+                        "Server name",
+                        crate::shell::field::field(
+                            SERVER_NAME_FIELD,
+                            &server.url,
+                            &self.server_name,
+                        )
+                        .on_input(Message::ServerNameEdited)
+                        .on_submit(Message::CommitServerName)
+                        .on_unfocus(Message::CommitServerName)
+                        .padding(Padding::from([8, 10]))
+                        .boxed(),
+                        "Bookmarks reuse the existing browser login for each server.",
+                    ),
+                )
+                .push(self.action(
+                    CONNECT_SERVER_CONTROL,
+                    "Connect to selected server",
+                    Message::ConnectSelectedServer,
+                ))
+                .push(self.action(FORGET_SERVER_CONTROL, forget, Message::ForgetSelectedServer));
+        }
+        servers = servers.push(self.action(
+            RESET_SERVER_CONTROL,
+            "Connect to another server",
+            Message::ResetSavedServer,
+        ));
+        controls = controls.push(self.group(SECTION_TITLES[5], servers));
 
         scrollable(controls)
             .id(SETTINGS_SCROLL)
@@ -256,14 +321,28 @@ impl Settings {
                 jfn_config::set_device_name(&self.device_name, &self.device_name_default);
                 jfn_config::settings_save_async();
             }
+            Message::CommitServerName => {
+                if let Some(server) = &self.selected_server {
+                    let url = server.url.clone();
+                    jfn_config::name_saved_server(&url, &self.server_name);
+                    self.servers = jfn_config::saved_servers();
+                    self.selected_server = self
+                        .servers
+                        .iter()
+                        .find(|server| server.url == url)
+                        .cloned();
+                    jfn_config::settings_save_async();
+                }
+            }
             _ => {}
         }
     }
 
-    /// Commits both text drafts before the containing overlay is dismissed.
+    /// Commits text drafts before the containing overlay is dismissed.
     pub fn dismiss(&mut self) -> Outcome {
         self.commit_text(Message::CommitAudioPassthrough);
         self.commit_text(Message::CommitDeviceName);
+        self.commit_text(Message::CommitServerName);
         Outcome::Dismiss
     }
 
@@ -307,9 +386,47 @@ impl Settings {
                 }
                 return Outcome::None;
             }
+            Message::ServerSelected(server) => {
+                self.commit_text(Message::CommitServerName);
+                self.server_name = server
+                    .as_ref()
+                    .map(|server| server.name.clone())
+                    .unwrap_or_default();
+                self.selected_server = server;
+                return Outcome::None;
+            }
+            Message::ServerNameEdited(name) => {
+                self.server_name = name;
+                return Outcome::None;
+            }
+            Message::CommitServerName => {
+                self.commit_text(Message::CommitServerName);
+                return Outcome::None;
+            }
+            Message::ConnectSelectedServer => {
+                self.dismiss();
+                return self
+                    .selected_server
+                    .as_ref()
+                    .map_or(Outcome::None, |server| {
+                        Outcome::ConnectServer(server.url.clone())
+                    });
+            }
+            Message::ForgetSelectedServer => {
+                if let Some(server) = self.selected_server.take() {
+                    let current = server.url == jfn_config::server_url().trim_end_matches('/');
+                    jfn_config::forget_saved_server(&server.url);
+                    self.servers = jfn_config::saved_servers();
+                    self.server_name.clear();
+                    if current {
+                        self.dismiss();
+                        jfn_config::settings_save_async();
+                        return Outcome::ResetSavedServer;
+                    }
+                }
+            }
             Message::ResetSavedServer => {
-                self.commit_text(Message::CommitAudioPassthrough);
-                self.commit_text(Message::CommitDeviceName);
+                self.dismiss();
                 jfn_config::set_server_url("");
                 jfn_config::settings_save_async();
                 return Outcome::ResetSavedServer;
@@ -331,6 +448,9 @@ impl Settings {
             device_name_default: "host".to_owned(),
             server_available: false,
             decoration_options: Vec::new(),
+            servers: Vec::new(),
+            selected_server: None,
+            server_name: String::new(),
         }
     }
 
@@ -432,8 +552,17 @@ fn control_order(display: DisplayBackend, decorations: bool, server: bool) -> Ve
     }
     ids.extend([HIDE_SCROLLBAR_CONTROL, DEVICE_NAME_FIELD, LOG_LEVEL_CONTROL]);
     if server {
-        ids.extend([OPEN_MPV_CONFIG_CONTROL, RESET_SERVER_CONTROL]);
+        ids.push(OPEN_MPV_CONFIG_CONTROL);
     }
+    ids.push(SERVER_PICKER_CONTROL);
+    if server {
+        ids.extend([
+            SERVER_NAME_FIELD,
+            CONNECT_SERVER_CONTROL,
+            FORGET_SERVER_CONTROL,
+        ]);
+    }
+    ids.push(RESET_SERVER_CONTROL);
     ids
 }
 
@@ -582,6 +711,10 @@ mod tests {
                 DEVICE_NAME_FIELD,
                 LOG_LEVEL_CONTROL,
                 OPEN_MPV_CONFIG_CONTROL,
+                SERVER_PICKER_CONTROL,
+                SERVER_NAME_FIELD,
+                CONNECT_SERVER_CONTROL,
+                FORGET_SERVER_CONTROL,
                 RESET_SERVER_CONTROL,
             ]
         );
@@ -597,6 +730,8 @@ mod tests {
                 HIDE_SCROLLBAR_CONTROL,
                 DEVICE_NAME_FIELD,
                 LOG_LEVEL_CONTROL,
+                SERVER_PICKER_CONTROL,
+                RESET_SERVER_CONTROL,
             ]
         );
     }
@@ -609,6 +744,24 @@ mod tests {
         settings.commit_text(Message::CommitDeviceName);
 
         assert_eq!(settings.device_name, "  living   room  ");
+    }
+
+    #[test]
+    fn selecting_a_bookmark_edits_its_name_without_connecting() {
+        let mut settings = Settings::testing();
+        let server = jfn_config::SavedServer {
+            name: "Home".into(),
+            url: "https://home/jellyfin".into(),
+        };
+        settings.servers.push(server.clone());
+        assert_eq!(
+            settings.update(Message::ServerSelected(Some(server.clone()))),
+            Outcome::None
+        );
+        assert_eq!(settings.selected_server, Some(server));
+        assert_eq!(settings.server_name, "Home");
+        settings.update(Message::ServerNameEdited(" Living room ".into()));
+        assert_eq!(settings.server_name, " Living room ");
     }
 
     #[test]

@@ -520,7 +520,7 @@ fn probe(overlay: &WebOverlay, cycle: u64, url: &str) {
     let probe = crate::server_probe::Probe::start(
         Arc::clone(&overlay.inner.session),
         url,
-        Box::new(move |base| handler(crate::WebEvent::ProbeFinished { cycle, base })),
+        Box::new(move |result| handler(crate::WebEvent::ProbeFinished { cycle, result })),
     );
     *PROBE.lock() = Some(probe);
 }

@@ -88,8 +88,7 @@
 
             this.handlers.onError = (error) => {
                 this.removeMediaDialog();
-                console.error(`[Media] [${this.logTag}] media error:`, error);
-                this.events.trigger(this, 'error', [{ type: 'mediadecodeerror' }]);
+                this.reportError(error);
             };
         }
 
@@ -334,7 +333,48 @@
 
         togglePictureInPicture() {}
         toggleAirPlay() {}
-        getStats() { return Promise.resolve({ categories: [] }); }
+        getStats() {
+            const diagnostics = window._playbackDiagnostics || {};
+            const measurement = value => Number.isFinite(value)
+                ? value.toLocaleString(undefined, { maximumSignificantDigits: 3 })
+                : null;
+            let bufferedTime = null;
+            if (Number.isFinite(diagnostics.cacheDuration)) {
+                const seconds = Math.round(diagnostics.cacheDuration);
+                bufferedTime = `${String(Math.floor(seconds / 60)).padStart(2, '0')}m ${String(seconds % 60).padStart(2, '0')}s`;
+            }
+            const bufferedMegabytes = Number.isFinite(diagnostics.cacheBytes)
+                ? `${measurement(diagnostics.cacheBytes / 1_000_000)} MB`
+                : null;
+            const inputRate = Number.isFinite(diagnostics.inputBytesPerSecond)
+                ? `${measurement(diagnostics.inputBytesPerSecond / 1_000_000)} MB/s`
+                : null;
+            // Jellyfin renders stat values as HTML, including values supplied by plugins.
+            const escape = value => String(value).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+            const category = (type, name, values) => ({
+                type, name,
+                stats: values.filter(([, value]) => value != null && value !== '')
+                    .map(([label, value]) => ({ label, value: escape(value) }))
+            });
+            return Promise.resolve({ categories: [
+                category('media', 'Playback', [
+                    ['Play method', this._currentPlayOptions?.playMethod],
+                    ['Buffering', diagnostics.buffering == null ? null : (diagnostics.buffering ? 'Yes' : 'No')],
+                    ['Buffered time (approximate)', bufferedTime],
+                    ['Buffered data', bufferedMegabytes],
+                    ['Input rate', inputRate]
+                ]),
+                category('video', 'Video', [
+                    ['Codec', diagnostics.videoCodec],
+                    ['Hardware decoding', diagnostics.hardwareDecoding],
+                    ['Dropped frames (output)', diagnostics.droppedFrames],
+                    ['Dropped frames (decoder)', diagnostics.decoderDroppedFrames]
+                ]),
+                category('audio', 'Audio', [['Codec', diagnostics.audioCodec]])
+            ].filter(category => category.stats.length) });
+        }
         getSupportedAspectRatios() {
             return [
                 { id: 'auto',  name: this.globalize.translate('Auto') },

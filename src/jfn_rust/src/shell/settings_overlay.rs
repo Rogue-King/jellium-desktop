@@ -28,11 +28,12 @@ pub enum Message {
     About(crate::shell::about::Message),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Outcome {
     None,
     Dismiss,
     ResetSavedServer,
+    ConnectServer(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -141,9 +142,14 @@ impl SettingsOverlay {
                 settings::Outcome::None => Outcome::None,
                 settings::Outcome::Dismiss => Outcome::Dismiss,
                 settings::Outcome::ResetSavedServer => Outcome::ResetSavedServer,
+                settings::Outcome::ConnectServer(url) => Outcome::ConnectServer(url),
             },
             Message::About(crate::shell::about::Message::OpenPath(path)) => {
                 self.about.open(&path);
+                Outcome::None
+            }
+            Message::About(crate::shell::about::Message::CopyDiagnostics) => {
+                self.about.copy_diagnostics();
                 Outcome::None
             }
         }

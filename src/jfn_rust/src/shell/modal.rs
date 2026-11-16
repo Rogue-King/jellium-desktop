@@ -152,6 +152,12 @@ impl Stack {
                 crate::shell::connect::Message::UrlEdited(url) => connection.edit_url(url),
                 crate::shell::connect::Message::Submit => connection.connect(),
                 crate::shell::connect::Message::DismissFailure => connection.dismiss_failure(),
+                crate::shell::connect::Message::SavedServerSelected(Some(server)) => {
+                    connection.switch_server(server.url)
+                }
+                crate::shell::connect::Message::SavedServerSelected(None) => {
+                    connection.edit_url(String::new())
+                }
             },
             (Some(View::SettingsOverlay(overlay)), Message::SettingsOverlay(message)) => {
                 match overlay.update(message) {
@@ -160,7 +166,11 @@ impl Stack {
                         self.views.pop();
                     }
                     OverlayOutcome::ResetSavedServer => {
-                        connection.edit_url(String::new());
+                        connection.disconnect();
+                        self.views.pop();
+                    }
+                    OverlayOutcome::ConnectServer(url) => {
+                        connection.switch_server(url);
                         self.views.pop();
                     }
                 }

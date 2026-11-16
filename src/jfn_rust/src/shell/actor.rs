@@ -277,7 +277,7 @@ fn ignored_key(model: &Model, event: &Event) -> Option<IgnoredKey> {
     };
     match key.as_ref() {
         Key::Named(Named::Escape) if model.stack.occupied() => Some(IgnoredKey::Escape),
-        Key::Named(Named::Tab) if model.stack.identity() == Some(Identity::SettingsOverlay) => {
+        Key::Named(Named::Tab) if model.stack.occupied() => {
             Some(IgnoredKey::Focus(if modifiers.shift() {
                 Direction::Backward
             } else {
@@ -384,6 +384,8 @@ fn settings_overlay_dismiss_last(messages: Vec<Message>) -> Vec<Message> {
                 crate::shell::settings_overlay::Message::Dismiss
                     | crate::shell::settings_overlay::Message::Settings(
                         crate::shell::settings::Message::ResetSavedServer
+                            | crate::shell::settings::Message::ConnectSelectedServer
+                            | crate::shell::settings::Message::ForgetSelectedServer
                     )
             ))
         )
@@ -411,7 +413,7 @@ struct FocusMemory {
     prior: Option<Id>,
     cache_lost: bool,
     pending_move: Option<Direction>,
-    settings_chain: Option<Box<dyn iced_core::widget::Operation>>,
+    focus_chain: Option<Box<dyn iced_core::widget::Operation>>,
 }
 
 /// What a rebuilt tree has to be told about focus before it takes events.
@@ -445,6 +447,10 @@ impl FocusMemory {
             self.prior.clone(),
             self.cache_lost,
         );
+        if self.modal_identity != identity || self.modal_tab != tab {
+            self.focus_chain = None;
+            self.pending_move = None;
+        }
         self.modal_identity = identity;
         self.modal_tab = tab;
         self.cache_lost = false;
@@ -454,7 +460,7 @@ impl FocusMemory {
         }
     }
 
-    /// Applies the plan, the settings focus chain a previous pass left, and a
+    /// Applies the plan, the modal focus chain a previous pass left, and a
     /// pending focus move. Returns true when the move left a chain to finish
     /// on the next pass.
     fn apply(&mut self, ui: &mut Ui<'_>, renderer: &iced_wgpu::Renderer, plan: FocusPlan) -> bool {
@@ -464,12 +470,12 @@ impl FocusMemory {
                 &mut iced_core::widget::operation::focusable::focus::<()>(id),
             );
         }
-        if self.modal_identity == Some(Identity::SettingsOverlay)
-            && let Some(mut operation) = self.settings_chain.take()
+        if self.modal_identity.is_some()
+            && let Some(mut operation) = self.focus_chain.take()
         {
             operate_all(ui, renderer, &mut *operation);
-        } else if self.modal_identity != Some(Identity::SettingsOverlay) {
-            self.settings_chain = None;
+        } else if self.modal_identity.is_none() {
+            self.focus_chain = None;
         }
         if let Some(restoration) = plan.restoration {
             if let Some(focus) = restoration.focus {
@@ -492,7 +498,7 @@ impl FocusMemory {
                 controls::move_focus(crate::shell::settings::SETTINGS_SCROLL, direction);
             ui.operate(renderer, &mut movement);
             if let iced_core::widget::operation::Outcome::Chain(operation) = movement.finish() {
-                self.settings_chain = Some(operation);
+                self.focus_chain = Some(operation);
                 chained = true;
             }
         }
@@ -756,12 +762,12 @@ impl Loop {
             Work::WebEvent(event) => {
                 let connection = &mut self.model.connection;
                 match event {
-                    jfn_cef::WebEvent::ProbeFinished { cycle, base } => match base {
-                        Some(base) => connection.probe_resolved(cycle, base),
-                        None => connection.probe_failed(cycle),
+                    jfn_cef::WebEvent::ProbeFinished { cycle, result } => match result {
+                        Ok(base) => connection.probe_resolved(cycle, base),
+                        Err(error) => connection.probe_failed(cycle, error),
                     },
-                    jfn_cef::WebEvent::NavigationFailed(navigation) => {
-                        connection.navigation_failed(navigation)
+                    jfn_cef::WebEvent::NavigationFailed { navigation, error } => {
+                        connection.navigation_failed(navigation, error)
                     }
                     jfn_cef::WebEvent::FramePresented(presented) => {
                         connection.frame_presented(presented)
@@ -1725,6 +1731,38 @@ mod tests {
                 true,
             ),
             Some(initial)
+        );
+    }
+
+    #[test]
+    fn tab_directions_are_forward_and_backward_on_connect() {
+        let screen = crate::connection::Screen::Form { url: String::new() };
+        let mut stack = Stack::empty(
+            crate::shell::metadata::ApplicationMetadata::testing(),
+            crate::shell::settings::Settings::testing,
+        );
+        stack.reconcile(&screen);
+        let model = Model {
+            stack,
+            screen,
+            connection: crate::connection::Connection::new(String::new()),
+            titlebar: Titlebar::new(),
+            inputs: ChromeInputs::default(),
+            theme: Theme::default(),
+        };
+        assert_eq!(
+            ignored_key(
+                &model,
+                &key(iced_core::keyboard::key::Named::Tab, Modifiers::empty())
+            ),
+            Some(IgnoredKey::Focus(Direction::Forward))
+        );
+        assert_eq!(
+            ignored_key(
+                &model,
+                &key(iced_core::keyboard::key::Named::Tab, Modifiers::SHIFT)
+            ),
+            Some(IgnoredKey::Focus(Direction::Backward))
         );
     }
 

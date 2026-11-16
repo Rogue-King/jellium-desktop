@@ -98,6 +98,12 @@ pub fn register_action_sink(sink: ActionSink) {
     with_coord(|c| c.add_action_sink(sink));
 }
 
+/// Record stop intent before mpv observes it, so a pending replacement cannot swallow its cancellation.
+pub fn jfn_playback_stop() {
+    post(Input::StopRequested);
+    jfn_mpv::api::jfn_mpv_stop();
+}
+
 pub fn jfn_playback_snapshot() -> PlaybackSnapshot {
     coord_handle().map_or_else(PlaybackSnapshot::fresh, |h| h.snapshot())
 }

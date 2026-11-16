@@ -964,6 +964,31 @@ mod tests {
     }
 
     #[test]
+    fn connect_focus_chain_reaches_the_saved_server_picker_without_a_scroll_viewport() {
+        let ids = [
+            crate::shell::connect::URL_FIELD,
+            crate::shell::connect::CONNECT_CONTROL,
+            crate::shell::connect::SAVED_SERVER_CONTROL,
+        ];
+        let mut states = [Focus(true), Focus(false), Focus(false)];
+        for expected in [1, 2] {
+            let mut movement =
+                move_focus(crate::shell::settings::SETTINGS_SCROLL, Direction::Forward);
+            for (id, state) in ids.iter().zip(&mut states) {
+                movement.focusable(Some(id), Rectangle::default(), state);
+            }
+            let widget::operation::Outcome::Chain(mut operation) = movement.finish() else {
+                unreachable!("focus scan returns a chain")
+            };
+            for (id, state) in ids.iter().zip(&mut states) {
+                operation.focusable(Some(id), Rectangle::default(), state);
+            }
+            assert!(states[expected].is_focused());
+            assert_eq!(states.iter().filter(|state| state.is_focused()).count(), 1);
+        }
+    }
+
+    #[test]
     fn a_focus_move_leaves_exactly_one_rendered_control_focused() {
         let ids = [Id::unique(), Id::unique(), Id::unique()];
         let mut states = [Focus(false), Focus(true), Focus(false)];

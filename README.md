@@ -2,6 +2,13 @@
 
 An unofficial [Jellyfin](https://jellyfin.org) desktop client built on [CEF](https://github.com/chromiumembedded/cef) and [mpv](https://mpv.io/).
 
+## Desktop features
+
+- Jellyfin's playback information panel shows actual mpv codecs, hardware decoding, separate output/decoder frame drops, and buffering/cache estimates alongside the play method.
+- **About → Copy diagnostics** copies runtime facts without server URLs, credentials, media titles, or local paths. The last playback failure and recovery guidance are also available in About.
+- Connection errors explain DNS, HTTPS/certificate, HTTP, and invalid-server failures. **Retry** keeps the address; **Edit address** returns to the form.
+- Native **Settings → Server** lets you switch between saved servers and edit their names. **Connect to another server** preserves bookmarks; forgetting the active server disconnects it. Switching stops playback. Existing browser logins are reused, not deleted or split into account profiles.
+
 ## Downloads
 ### Linux
 - AppImage
@@ -27,6 +34,12 @@ sudo xattr -cr /Applications/Jellium\ Desktop.app
 ## Development
 
 This project uses [just](https://github.com/casey/just) as a command runner.
+
+The injected-player JavaScript self-checks use Node's built-in runner (no npm install):
+
+```sh
+node --test src/web/tests/player.test.cjs
+```
 
 ### macOS with Nix
 

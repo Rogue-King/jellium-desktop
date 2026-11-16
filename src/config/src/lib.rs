@@ -47,9 +47,27 @@ impl Default for JfnWindowGeometry {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedServer {
+    pub name: String,
+    pub url: String,
+}
+
+impl std::fmt::Display for SavedServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.name == self.url {
+            f.write_str(&self.name)
+        } else {
+            write!(f, "{} ({})", self.name, self.url)
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SettingsData {
     server_url: String,
+    saved_servers: Vec<SavedServer>,
     hwdec: Hwdec,
     audio_passthrough: String,
     audio_channels: String,
@@ -68,6 +86,7 @@ impl Default for SettingsData {
     fn default() -> Self {
         Self {
             server_url: String::new(),
+            saved_servers: Vec::new(),
             hwdec: Hwdec::default(),
             audio_passthrough: String::new(),
             audio_channels: String::new(),
@@ -91,6 +110,9 @@ impl Default for SettingsData {
 struct SettingsFile {
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     server_url: Option<String>,
+
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    saved_servers: Option<Vec<SavedServer>>,
 
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     window_width: Option<i32>,
@@ -225,9 +247,47 @@ struct CliSettings<'a> {
 }
 
 impl SettingsData {
+    fn remember_server(&mut self, url: &str, name: Option<&str>) {
+        let url = url.trim().trim_end_matches('/');
+        if url.is_empty() {
+            return;
+        }
+        let name = name.map(str::trim).filter(|name| !name.is_empty());
+        if let Some(server) = self
+            .saved_servers
+            .iter_mut()
+            .find(|server| server.url == url)
+        {
+            if let Some(name) = name {
+                server.name = name.to_owned();
+            }
+        } else {
+            self.saved_servers.push(SavedServer {
+                url: url.to_owned(),
+                name: name.unwrap_or(url).to_owned(),
+            });
+        }
+    }
+
+    fn forget_server(&mut self, url: &str) {
+        self.saved_servers.retain(|server| server.url != url);
+        if self.server_url.trim_end_matches('/') == url {
+            self.server_url.clear();
+        }
+    }
+
     fn overlay(&mut self, file: SettingsFile) {
         if let Some(v) = file.server_url {
             self.server_url = v;
+        }
+        if let Some(servers) = file.saved_servers {
+            self.saved_servers.clear();
+            for server in servers {
+                self.remember_server(&server.url, Some(&server.name));
+            }
+        } else {
+            // Keep the single-server setting usable as the first bookmark.
+            self.remember_server(&self.server_url.clone(), None);
         }
         if let Some(v) = file.hwdec {
             self.hwdec = v;
@@ -292,6 +352,7 @@ impl SettingsData {
         let position = self.window.x >= 0 && self.window.y >= 0;
         SettingsFile {
             server_url: Some(self.server_url.clone()),
+            saved_servers: (!self.saved_servers.is_empty()).then(|| self.saved_servers.clone()),
             window_width: size.then_some(self.window.width),
             window_height: size.then_some(self.window.height),
             window_logical_width: logical.then_some(self.window.logical_width),
@@ -507,7 +568,27 @@ macro_rules! bool_accessors {
     };
 }
 
-string_accessors!(server_url, set_server_url, server_url);
+pub fn server_url() -> String {
+    state().lock().data.server_url.clone()
+}
+
+pub fn set_server_url(url: &str) {
+    let mut state = state().lock();
+    state.data.server_url = url.to_owned();
+    state.data.remember_server(url, None);
+}
+
+pub fn saved_servers() -> Vec<SavedServer> {
+    state().lock().data.saved_servers.clone()
+}
+
+pub fn name_saved_server(url: &str, name: &str) {
+    state().lock().data.remember_server(url, Some(name));
+}
+
+pub fn forget_saved_server(url: &str) {
+    state().lock().data.forget_server(url);
+}
 
 pub fn hwdec() -> Hwdec {
     state().lock().data.hwdec
@@ -698,6 +779,10 @@ mod tests {
     fn every_key_writes_in_schema_order() {
         let data = SettingsData {
             server_url: "http://host".into(),
+            saved_servers: vec![super::SavedServer {
+                name: "Home".into(),
+                url: "http://host".into(),
+            }],
             hwdec: "auto".parse().expect("auto is offered everywhere"),
             audio_passthrough: "eac3".into(),
             audio_channels: "stereo".into(),
@@ -724,6 +809,7 @@ mod tests {
             keys(&text),
             [
                 "serverUrl",
+                "savedServers",
                 "windowWidth",
                 "windowHeight",
                 "windowLogicalWidth",
@@ -745,6 +831,34 @@ mod tests {
             ]
         );
         assert!(text.contains(r#""windowDecorations":"serverThemed""#));
+    }
+
+    #[test]
+    fn legacy_server_migrates_and_named_bookmarks_round_trip_without_duplicates() {
+        let mut data = loaded(r#"{"serverUrl":"https://server/jellyfin/"}"#);
+        assert_eq!(data.saved_servers.len(), 1);
+        data.remember_server("https://server/jellyfin", Some(" Living room "));
+        data.remember_server("https://second", Some("Remote"));
+        data.remember_server("https://server/jellyfin/", None);
+        assert_eq!(data.saved_servers.len(), 2);
+        assert_eq!(data.saved_servers[0].name, "Living room");
+        let json = serde_json::to_string(&data.to_file()).expect("serializes");
+        let restored = loaded(&json);
+        assert_eq!(restored.saved_servers, data.saved_servers);
+        assert_eq!(restored.server_url, data.server_url);
+        data.forget_server("https://server/jellyfin");
+        assert!(data.server_url.is_empty());
+        assert_eq!(data.saved_servers[0].name, "Remote");
+    }
+
+    #[test]
+    fn empty_and_duplicate_bookmarks_do_not_replace_valid_settings() {
+        let data = loaded(
+            r#"{"serverUrl":"https://current","savedServers":[{"name":"Home","url":"https://home/"},{"name":"Renamed","url":"https://home"},{"name":"Empty","url":" "}]}"#,
+        );
+        assert_eq!(data.saved_servers.len(), 1);
+        assert_eq!(data.saved_servers[0].name, "Renamed");
+        assert_eq!(data.server_url, "https://current");
     }
 
     #[test]

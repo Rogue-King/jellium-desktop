@@ -17,6 +17,14 @@ struct BufferedRange {
     end: i64,
 }
 
+#[derive(Serialize)]
+struct WebPlaybackError<'a> {
+    r#type: &'static str,
+    code: Option<i32>,
+    message: &'a str,
+    guidance: &'static str,
+}
+
 type SetHzCb = extern "C" fn(f64);
 
 struct Handlers {
@@ -44,19 +52,37 @@ pub fn jfn_playback_was_maximized_before_fullscreen() -> bool {
 
 pub(crate) fn deliver(ev: &PlaybackEvent) {
     let snap = &ev.snapshot;
+    if matches!(
+        ev.kind,
+        PlaybackEventKind::TrackLoaded
+            | PlaybackEventKind::DiagnosticsChanged
+            | PlaybackEventKind::BufferingChanged
+    ) {
+        let json = jfn_js_json::to_js_json(&snap.diagnostics).unwrap_or_else(|| "{}".to_owned());
+        call_exec_js(&format!(
+            "window._nativeUpdateDiagnostics({json},{})",
+            snap.buffering
+        ));
+    }
     match ev.kind {
         PlaybackEventKind::Started => call_exec_js("window._nativeEmit('playing')"),
         PlaybackEventKind::Paused => call_exec_js("window._nativeEmit('paused')"),
         PlaybackEventKind::Finished => call_exec_js("window._nativeEmit('finished')"),
         PlaybackEventKind::Canceled => call_exec_js("window._nativeEmit('canceled')"),
         PlaybackEventKind::Error => {
-            let msg = if ev.error_message.is_empty() {
-                "Playback error"
-            } else {
-                ev.error_message.as_str()
+            let failure = crate::PlaybackFailure {
+                code: ev.error_code,
+                message: ev.error_message.clone(),
             };
-            let text = jfn_js_json::to_js_json(msg).unwrap_or_else(|| "\"\"".to_string());
-            call_exec_js(&format!("window._nativeEmit('error',{text})"));
+            let (kind, guidance) = failure.details();
+            let error = WebPlaybackError {
+                r#type: kind,
+                code: failure.code,
+                message: &failure.message,
+                guidance,
+            };
+            let json = jfn_js_json::to_js_json(&error).unwrap_or_else(|| "{}".to_owned());
+            call_exec_js(&format!("window._nativeEmit('error',{json})"));
         }
         PlaybackEventKind::SeekingChanged => {
             if ev.flag {
@@ -96,6 +122,7 @@ pub(crate) fn deliver(ev: &PlaybackEvent) {
                 cb(snap.display_hz);
             }
         }
+        PlaybackEventKind::DiagnosticsChanged | PlaybackEventKind::BufferingChanged => {}
         PlaybackEventKind::BufferedRangesChanged => {
             let ranges: Vec<BufferedRange> = snap
                 .buffered
@@ -108,8 +135,7 @@ pub(crate) fn deliver(ev: &PlaybackEvent) {
             let json = jfn_js_json::to_js_json(&ranges).unwrap_or_else(|| "[]".to_string());
             call_exec_js(&format!("window._nativeUpdateBufferedRanges({json})"));
         }
-        PlaybackEventKind::BufferingChanged
-        | PlaybackEventKind::MediaTypeChanged
+        PlaybackEventKind::MediaTypeChanged
         | PlaybackEventKind::MetadataChanged
         | PlaybackEventKind::ArtworkChanged
         | PlaybackEventKind::QueueCapsChanged

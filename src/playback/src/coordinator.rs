@@ -16,10 +16,12 @@ use crate::types::*;
 pub enum Input {
     FileLoaded,
     LoadStarting(String),
+    StopRequested,
     PauseChanged(bool),
     EndFile {
         reason: EndReason,
         error_message: String,
+        error_code: Option<i32>,
     },
     SeekingChanged(bool),
     PausedForCache(bool),
@@ -34,6 +36,7 @@ pub enum Input {
         was_maximized: bool,
     },
     BufferedRanges(Vec<PlaybackBufferedRange>),
+    Diagnostic(PlaybackDiagnostic),
     DisplayHz(f64),
     Metadata(MediaMetadata),
     Artwork(String),
@@ -231,11 +234,13 @@ fn apply(sm: &mut PlaybackStateMachine, input: Input, out: &mut Vec<PlaybackEven
     let mut emitted = match input {
         Input::FileLoaded => sm.on_file_loaded(),
         Input::LoadStarting(id) => sm.on_load_starting(id),
+        Input::StopRequested => sm.on_stop_requested(),
         Input::PauseChanged(paused) => sm.on_pause_changed(paused),
         Input::EndFile {
             reason,
             error_message,
-        } => sm.on_end_file(reason, error_message),
+            error_code,
+        } => sm.on_end_file(reason, error_message, error_code),
         Input::SeekingChanged(seeking) => sm.on_seeking_changed(seeking),
         Input::PausedForCache(pfc) => sm.on_paused_for_cache(pfc),
         Input::CoreIdle(ci) => sm.on_core_idle(ci),
@@ -249,6 +254,7 @@ fn apply(sm: &mut PlaybackStateMachine, input: Input, out: &mut Vec<PlaybackEven
             was_maximized,
         } => sm.on_fullscreen(fullscreen, was_maximized),
         Input::BufferedRanges(r) => sm.on_buffered_ranges(r),
+        Input::Diagnostic(update) => sm.on_diagnostic(update),
         Input::DisplayHz(h) => sm.on_display_hz(h),
         Input::Metadata(m) => {
             // Route media_type through the SM so snapshot.media_type
@@ -372,6 +378,7 @@ mod tests {
         handle.enqueue(Input::EndFile {
             reason: EndReason::Eof,
             error_message: String::new(),
+            error_code: None,
         });
         assert_eq!(coord.snapshot().presence, PlayerPresence::Present);
     }

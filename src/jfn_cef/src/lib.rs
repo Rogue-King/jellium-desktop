@@ -7,6 +7,7 @@ pub mod business_web;
 mod cef_string;
 pub mod client;
 mod client_impl;
+mod connection_error;
 mod embedded_js;
 mod ffi;
 mod frame_rate;
@@ -37,6 +38,7 @@ pub use runtime::{
 };
 
 mod navigation;
+pub use connection_error::ConnectionError;
 pub use navigation::{Navigation, NavigationPresented, WebEvent, WebEventHandler};
 
 pub use ready::ReadinessError as WebOperationError;

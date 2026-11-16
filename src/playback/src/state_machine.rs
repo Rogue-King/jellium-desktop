@@ -5,6 +5,7 @@ use crate::types::*;
 pub struct PlaybackStateMachine {
     s: PlaybackSnapshot,
     pending_load: bool,
+    stop_requested: bool,
     pause_requested: bool,
     paused_for_cache: bool,
     core_idle: bool,
@@ -24,6 +25,7 @@ impl PlaybackStateMachine {
         Self {
             s: PlaybackSnapshot::fresh(),
             pending_load: false,
+            stop_requested: false,
             pause_requested: false,
             paused_for_cache: false,
             core_idle: false,
@@ -41,7 +43,42 @@ impl PlaybackStateMachine {
         std::mem::take(&mut self.pending_actions)
     }
 
+    pub fn on_diagnostic(&mut self, update: PlaybackDiagnostic) -> Vec<PlaybackEvent> {
+        let previous = self.s.diagnostics.clone();
+        let stats = &mut self.s.diagnostics;
+        match update {
+            PlaybackDiagnostic::VideoCodec(value) => stats.video_codec = value,
+            PlaybackDiagnostic::AudioCodec(value) => stats.audio_codec = value,
+            PlaybackDiagnostic::HardwareDecoding(value) => stats.hardware_decoding = value,
+            PlaybackDiagnostic::DroppedFrames(value) => stats.dropped_frames = value,
+            PlaybackDiagnostic::DecoderDroppedFrames(value) => stats.decoder_dropped_frames = value,
+            PlaybackDiagnostic::Cache {
+                duration,
+                bytes,
+                input_bytes_per_second,
+            } => {
+                stats.cache_duration = duration.filter(|v| v.is_finite() && *v >= 0.0);
+                stats.cache_bytes = bytes.filter(|v| *v >= 0);
+                stats.input_bytes_per_second =
+                    input_bytes_per_second.filter(|v| v.is_finite() && *v >= 0.0);
+            }
+        }
+        if *stats == previous {
+            Vec::new()
+        } else {
+            vec![PlaybackEvent::new(PlaybackEventKind::DiagnosticsChanged)]
+        }
+    }
+
+    pub fn on_stop_requested(&mut self) -> Vec<PlaybackEvent> {
+        self.stop_requested = true;
+        Vec::new()
+    }
+
     pub fn on_file_loaded(&mut self) -> Vec<PlaybackEvent> {
+        if self.stop_requested {
+            return Vec::new();
+        }
         self.s.presence = PlayerPresence::Present;
         self.s.phase = PlaybackPhase::Starting;
         self.s.seeking = false;
@@ -60,11 +97,14 @@ impl PlaybackStateMachine {
 
     pub fn on_load_starting(&mut self, item_id: String) -> Vec<PlaybackEvent> {
         self.pending_load = true;
+        self.stop_requested = false;
         self.s.presence = PlayerPresence::Present;
         self.s.phase = PlaybackPhase::Starting;
         self.s.seeking = false;
         self.s.buffering = self.paused_for_cache || self.core_idle;
         self.s.variant_switch_pending = !item_id.is_empty() && item_id == self.last_known_item_id;
+        self.s.diagnostics = PlaybackDiagnostics::default();
+        self.s.last_error = None;
         if !item_id.is_empty() {
             self.last_known_item_id = item_id;
         }
@@ -112,7 +152,12 @@ impl PlaybackStateMachine {
         vec![]
     }
 
-    pub fn on_end_file(&mut self, reason: EndReason, error_message: String) -> Vec<PlaybackEvent> {
+    pub fn on_end_file(
+        &mut self,
+        reason: EndReason,
+        error_message: String,
+        error_code: Option<i32>,
+    ) -> Vec<PlaybackEvent> {
         let mut out = vec![];
 
         if self.s.seeking {
@@ -132,7 +177,7 @@ impl PlaybackStateMachine {
         // flight. Eat the EOF/cancel so consumers don't see a Stopped
         // flicker between tracks. Errors still terminate so failures
         // surface to the user.
-        if self.pending_load && reason != EndReason::Error {
+        if self.pending_load && !self.stop_requested && reason != EndReason::Error {
             self.pending_load = false;
             self.s.presence = PlayerPresence::Present;
             self.s.phase = PlaybackPhase::Starting;
@@ -140,6 +185,7 @@ impl PlaybackStateMachine {
         }
 
         self.pending_load = false;
+        self.stop_requested = false;
         self.pause_requested = false;
         self.s.presence = PlayerPresence::None;
         self.s.phase = PlaybackPhase::Stopped;
@@ -153,7 +199,12 @@ impl PlaybackStateMachine {
             EndReason::Error => PlaybackEvent::new(PlaybackEventKind::Error),
         };
         if reason == EndReason::Error {
+            self.s.last_error = Some(PlaybackFailure {
+                code: error_code,
+                message: error_message.clone(),
+            });
             terminal.error_message = error_message;
+            terminal.error_code = error_code;
         }
         out.push(terminal);
         out
@@ -351,6 +402,31 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_updates_clear_unavailable_values_and_reset_for_a_new_load() {
+        let mut sm = PlaybackStateMachine::new();
+        assert!(has(
+            &sm.on_diagnostic(PlaybackDiagnostic::DroppedFrames(Some(0))),
+            PlaybackEventKind::DiagnosticsChanged
+        ));
+        assert_eq!(sm.snapshot().diagnostics.dropped_frames, Some(0));
+        assert!(
+            sm.on_diagnostic(PlaybackDiagnostic::DroppedFrames(Some(0)))
+                .is_empty()
+        );
+        sm.on_diagnostic(PlaybackDiagnostic::DroppedFrames(None));
+        assert_eq!(sm.snapshot().diagnostics.dropped_frames, None);
+        sm.on_diagnostic(PlaybackDiagnostic::Cache {
+            duration: Some(f64::NAN),
+            bytes: Some(-1),
+            input_bytes_per_second: Some(f64::INFINITY),
+        });
+        assert_eq!(sm.snapshot().diagnostics, PlaybackDiagnostics::default());
+        sm.on_diagnostic(PlaybackDiagnostic::VideoCodec(Some("h264".into())));
+        sm.on_load_starting("next".into());
+        assert_eq!(sm.snapshot().diagnostics, PlaybackDiagnostics::default());
+    }
+
+    #[test]
     fn default_snapshot_stopped_absent() {
         let sm = PlaybackStateMachine::new();
         let s = sm.snapshot();
@@ -403,7 +479,7 @@ mod tests {
 
         sm.on_load_starting(String::new());
         sm.on_position(8_000_000);
-        let out = sm.on_end_file(EndReason::Eof, String::new());
+        let out = sm.on_end_file(EndReason::Eof, String::new(), None);
         assert!(!has(&out, PlaybackEventKind::Finished));
         assert_eq!(sm.snapshot().position_us, 8_000_000);
         sm.on_file_loaded();
@@ -455,7 +531,7 @@ mod tests {
         sm.on_pause_changed(false);
         sm.on_load_starting("item-A".into());
         assert!(sm.snapshot().variant_switch_pending);
-        sm.on_end_file(EndReason::Error, "boom".into());
+        sm.on_end_file(EndReason::Error, "boom".into(), None);
         assert!(!sm.snapshot().variant_switch_pending);
     }
 
@@ -483,7 +559,7 @@ mod tests {
         sm.on_load_starting("item-A".into());
         sm.on_file_loaded();
         sm.on_pause_changed(false);
-        sm.on_end_file(EndReason::Eof, String::new());
+        sm.on_end_file(EndReason::Eof, String::new(), None);
         sm.on_load_starting("item-A".into());
         assert!(!sm.snapshot().variant_switch_pending);
     }
@@ -496,7 +572,7 @@ mod tests {
         assert_eq!(sm.snapshot().phase, PlaybackPhase::Playing);
 
         sm.on_load_starting(String::new());
-        let out = sm.on_end_file(EndReason::Eof, String::new());
+        let out = sm.on_end_file(EndReason::Eof, String::new(), None);
         assert!(!has(&out, PlaybackEventKind::Finished));
         assert!(!has(&out, PlaybackEventKind::Canceled));
         let s = sm.snapshot();
@@ -515,7 +591,7 @@ mod tests {
         sm.on_file_loaded();
         sm.on_pause_changed(false);
         sm.on_load_starting(String::new());
-        let out = sm.on_end_file(EndReason::Canceled, String::new());
+        let out = sm.on_end_file(EndReason::Canceled, String::new(), None);
         assert!(!has(&out, PlaybackEventKind::Canceled));
         assert_eq!(sm.snapshot().phase, PlaybackPhase::Starting);
     }
@@ -526,7 +602,7 @@ mod tests {
         sm.on_file_loaded();
         sm.on_pause_changed(false);
         sm.on_load_starting(String::new());
-        let out = sm.on_end_file(EndReason::Error, "boom".into());
+        let out = sm.on_end_file(EndReason::Error, "boom".into(), None);
         assert!(has(&out, PlaybackEventKind::Error));
         assert_eq!(sm.snapshot().phase, PlaybackPhase::Stopped);
         assert_eq!(sm.snapshot().presence, PlayerPresence::None);
@@ -537,7 +613,7 @@ mod tests {
         let mut sm = PlaybackStateMachine::new();
         sm.on_load_starting(String::new());
         sm.on_file_loaded();
-        let out = sm.on_end_file(EndReason::Eof, String::new());
+        let out = sm.on_end_file(EndReason::Eof, String::new(), None);
         assert!(has(&out, PlaybackEventKind::Finished));
     }
 
@@ -609,7 +685,7 @@ mod tests {
         sm.on_pause_changed(false);
         sm.on_seeking_changed(true);
         sm.on_paused_for_cache(true);
-        let out = sm.on_end_file(EndReason::Eof, String::new());
+        let out = sm.on_end_file(EndReason::Eof, String::new(), None);
         assert!(has(&out, PlaybackEventKind::Finished));
         let mut saw_seek_false = false;
         let mut saw_buf_false = false;
@@ -631,14 +707,31 @@ mod tests {
     }
 
     #[test]
+    fn explicit_stop_during_load_waits_for_mpv_then_reaches_stopped() {
+        let mut sm = PlaybackStateMachine::new();
+        sm.on_load_starting("unfinished".into());
+        assert!(sm.on_stop_requested().is_empty());
+        assert_eq!(sm.snapshot().phase, PlaybackPhase::Starting);
+        assert!(sm.on_file_loaded().is_empty());
+        assert!(sm.consume_actions().is_empty());
+        let events = sm.on_end_file(EndReason::Canceled, String::new(), None);
+        assert!(has(&events, PlaybackEventKind::Canceled));
+        assert_eq!(sm.snapshot().presence, PlayerPresence::None);
+        assert_eq!(sm.snapshot().phase, PlaybackPhase::Stopped);
+    }
+
+    #[test]
     fn error_end_file_carries_message() {
         let mut sm = PlaybackStateMachine::new();
         sm.on_file_loaded();
         sm.on_pause_changed(false);
-        let out = sm.on_end_file(EndReason::Error, "boom".into());
+        let code = jfn_mpv::sys::mpv_error::MPV_ERROR_AO_INIT_FAILED.0;
+        let out = sm.on_end_file(EndReason::Error, "boom".into(), Some(code));
+        assert!(out.iter().any(|e| e.kind == PlaybackEventKind::Error
+            && e.error_message == "boom"
+            && e.error_code == Some(code)));
         assert!(
-            out.iter()
-                .any(|e| e.kind == PlaybackEventKind::Error && e.error_message == "boom")
+            matches!(sm.snapshot().last_error, Some(error) if error.code == Some(code) && error.details().1.contains("Audio output"))
         );
     }
 
@@ -646,7 +739,7 @@ mod tests {
     fn cancel_end_file_emits_canceled() {
         let mut sm = PlaybackStateMachine::new();
         sm.on_file_loaded();
-        let out = sm.on_end_file(EndReason::Canceled, String::new());
+        let out = sm.on_end_file(EndReason::Canceled, String::new(), None);
         assert!(has(&out, PlaybackEventKind::Canceled));
     }
 

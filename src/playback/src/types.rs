@@ -65,6 +65,76 @@ pub struct PlaybackBufferedRange {
     pub end_ticks: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackDiagnostics {
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+    pub hardware_decoding: Option<String>,
+    pub dropped_frames: Option<i64>,
+    pub decoder_dropped_frames: Option<i64>,
+    pub cache_duration: Option<f64>,
+    pub cache_bytes: Option<i64>,
+    pub input_bytes_per_second: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub enum PlaybackDiagnostic {
+    VideoCodec(Option<String>),
+    AudioCodec(Option<String>),
+    HardwareDecoding(Option<String>),
+    DroppedFrames(Option<i64>),
+    DecoderDroppedFrames(Option<i64>),
+    Cache {
+        duration: Option<f64>,
+        bytes: Option<i64>,
+        input_bytes_per_second: Option<f64>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct PlaybackFailure {
+    pub code: Option<i32>,
+    pub message: String,
+}
+
+impl PlaybackFailure {
+    pub fn details(&self) -> (&'static str, &'static str) {
+        use jfn_mpv::sys::mpv_error as Code;
+        match self.code {
+            Some(code) if code == Code::MPV_ERROR_LOADING_FAILED.0 => (
+                "NETWORK_ERROR",
+                "The media stream could not be opened. Check server connectivity and access to this item, then retry.",
+            ),
+            Some(code)
+                if code == Code::MPV_ERROR_UNKNOWN_FORMAT.0
+                    || code == Code::MPV_ERROR_UNSUPPORTED.0 =>
+            {
+                (
+                    "MEDIA_NOT_SUPPORTED",
+                    "mpv could not play this format. Try enabling Force Transcoding in client settings.",
+                )
+            }
+            Some(code) if code == Code::MPV_ERROR_AO_INIT_FAILED.0 => (
+                "PLAYER_ERROR",
+                "Audio output could not be initialized. Check the audio device and exclusive-output settings.",
+            ),
+            Some(code) if code == Code::MPV_ERROR_VO_INIT_FAILED.0 => (
+                "PLAYER_ERROR",
+                "Video output could not be initialized. Check graphics drivers and hardware-decoding settings.",
+            ),
+            Some(code) if code == Code::MPV_ERROR_NOTHING_TO_PLAY.0 => (
+                "NO_MEDIA_ERROR",
+                "No playable audio or video stream was found. Try a different media source or server-side transcoding.",
+            ),
+            _ => (
+                "PLAYER_ERROR",
+                "Playback failed. Retry the item, or copy diagnostics from About for troubleshooting.",
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlaybackSnapshot {
     pub presence: PlayerPresence,
@@ -80,6 +150,8 @@ pub struct PlaybackSnapshot {
     pub maximized_before_fullscreen: bool,
     pub display_hz: f64,
     pub buffered: Vec<PlaybackBufferedRange>,
+    pub diagnostics: PlaybackDiagnostics,
+    pub last_error: Option<PlaybackFailure>,
 }
 
 impl PlaybackSnapshot {
@@ -113,6 +185,7 @@ pub enum PlaybackEventKind {
     ArtworkChanged = 17,
     QueueCapsChanged = 18,
     Seeked = 19,
+    DiagnosticsChanged = 20,
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +193,7 @@ pub struct PlaybackEvent {
     pub kind: PlaybackEventKind,
     pub flag: bool,
     pub error_message: String,
+    pub error_code: Option<i32>,
     pub snapshot: PlaybackSnapshot,
     pub metadata: MediaMetadata,
     pub artwork_uri: String,
@@ -133,6 +207,7 @@ impl PlaybackEvent {
             kind,
             flag: false,
             error_message: String::new(),
+            error_code: None,
             snapshot: PlaybackSnapshot::default(),
             metadata: MediaMetadata::default(),
             artwork_uri: String::new(),

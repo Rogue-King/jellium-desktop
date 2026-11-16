@@ -11,9 +11,10 @@ use std::sync::Arc;
 use cef::rc::Rc;
 use cef::{ThreadId, post_task, wrap_task};
 
-use jfn_jellyfin::{extract_base_url, is_valid_public_info, normalize_input};
+use crate::connection_error::{ConnectionError, validate_server_response};
+use jfn_jellyfin::{extract_base_url, normalize_input};
 
-pub type ProbeCallback = Box<dyn FnOnce(Option<String>) + Send + Sync>;
+pub type ProbeCallback = Box<dyn FnOnce(Result<String, ConnectionError>) + Send + Sync>;
 
 #[derive(Copy, Clone, PartialEq)]
 enum Phase {
@@ -39,8 +40,7 @@ pub(crate) struct Probe {
 
 impl Probe {
     /// Answers with the canonical base URL of the Jellyfin server `url`
-    /// resolves to, and with nothing else: a URL that resolves to no Jellyfin
-    /// server answers `None`, on the CEF UI thread.
+    /// resolves to, or a failure safe to display, on the CEF UI thread.
     ///
     /// Callable from any thread: `CefURLRequest::Create` is UI-thread-only
     /// under a multi-threaded message loop, so the request is built inside a
@@ -74,7 +74,7 @@ impl Probe {
             state.lock().cancelled = true;
             let callback = state.lock().callback.take();
             if let Some(callback) = callback {
-                session.dispatch(|| callback(None));
+                session.dispatch(|| callback(Err(ConnectionError::Unavailable)));
             }
         }
         Probe { state }
@@ -102,6 +102,10 @@ fn start_on_ui(state: &Arc<Mutex<ProbeState>>) {
         }
         st.url.clone()
     };
+    if !head_url.starts_with("http://") && !head_url.starts_with("https://") {
+        finish(state, Err(ConnectionError::InvalidUrl));
+        return;
+    }
     let client = JfnServerProbeClient::new(Arc::clone(state));
     let request = make_request("HEAD", &head_url, client);
     let mut st = state.lock();
@@ -121,7 +125,7 @@ fn start_on_ui(state: &Arc<Mutex<ProbeState>>) {
             );
             if let Some(f) = st.callback.take() {
                 drop(st);
-                f(None);
+                f(Err(ConnectionError::Unavailable));
             }
         }
     }
@@ -146,61 +150,69 @@ wrap_task! {
     }
 }
 
+fn finish(state: &Arc<Mutex<ProbeState>>, result: Result<String, ConnectionError>) {
+    let callback = {
+        let mut state = state.lock();
+        state.active = None;
+        state.callback.take()
+    };
+    if let Some(callback) = callback {
+        callback(result);
+    }
+}
+
 fn on_complete(state: &Arc<Mutex<ProbeState>>, request: &Urlrequest) {
     if !state.lock().session.is_active() {
         cancel_on_ui(state);
         return;
     }
-    // HEAD phase: extract resolved base URL, post GET on /System/Info/Public.
-    let next_request = {
+    if request.request_status().as_ref() != &sys::cef_urlrequest_status_t::UR_SUCCESS {
+        let code: sys::cef_errorcode_t = request.request_error().into();
+        finish(state, Err(ConnectionError::from_cef(code as i32)));
+        return;
+    }
+    let head = {
         let mut st = state.lock();
         if st.callback.is_none() {
             return;
         }
         if st.phase == Phase::Head {
-            let mut resolved = st.url.clone();
-            if let Some(resp) = request.response() {
-                let url_uf = resp.url();
-                let cs: CefString = (&url_uf).into();
-                let s = cs.to_string();
-                if !s.is_empty() {
-                    resolved = s;
-                }
-            }
+            let resolved = request
+                .response()
+                .map(|resp| {
+                    let url = resp.url();
+                    let url: CefString = (&url).into();
+                    url.to_string()
+                })
+                .filter(|url| !url.is_empty())
+                .unwrap_or_else(|| st.url.clone());
             st.base = extract_base_url(&resolved).to_string();
             st.phase = Phase::Get;
-            let next_url = format!("{}/System/Info/Public", st.base);
-            let client = JfnServerProbeClient::new(Arc::clone(state));
-            let next = make_request("GET", &next_url, client);
-            st.active = next.clone();
-            next
+            Some(format!("{}/System/Info/Public", st.base))
         } else {
             None
         }
     };
-    if next_request.is_some() {
+    if let Some(url) = head {
+        // A server may reject HEAD while accepting GET; only transport failures abort the first phase.
+        let client = JfnServerProbeClient::new(Arc::clone(state));
+        if let Some(next) = make_request("GET", &url, client) {
+            state.lock().active = Some(next);
+        } else {
+            finish(state, Err(ConnectionError::Unavailable));
+        }
         return;
     }
-
-    // GET phase complete: validate body, then invoke caller.
-    let (success, base, cb) = {
-        let mut st = state.lock();
-        let mut ok = false;
-        let status = request.request_status();
-        if status.as_ref() == &sys::cef_urlrequest_status_t::UR_SUCCESS
-            && let Some(resp) = request.response()
-            && resp.status() == 200
-        {
-            ok = is_valid_public_info(&st.body);
+    let result = {
+        let st = state.lock();
+        match request.response() {
+            Some(response) => {
+                validate_server_response(response.status(), &st.body).map(|()| st.base.clone())
+            }
+            None => Err(ConnectionError::Unavailable),
         }
-        let base = st.base.clone();
-        st.active = None;
-        let cb = st.callback.take();
-        (ok, base, cb)
     };
-    if let Some(f) = cb {
-        f(success.then_some(base));
-    }
+    finish(state, result);
 }
 
 fn make_request(method: &str, url: &str, client: UrlrequestClient) -> Option<Urlrequest> {

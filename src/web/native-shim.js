@@ -52,6 +52,11 @@
         window._bufferedRanges = ranges || [];
     };
 
+    window._playbackDiagnostics = {};
+    window._nativeUpdateDiagnostics = function(diagnostics, buffering) {
+        window._playbackDiagnostics = { ...diagnostics, buffering: !!buffering };
+    };
+
     // Signal emulation (Qt-style connect/disconnect)
     function createSignal(name) {
         const callbacks = [];

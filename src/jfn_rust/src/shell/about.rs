@@ -12,6 +12,7 @@ use crate::shell::theme::{self, Theme};
 
 pub const CONFIG_DIRECTORY_CONTROL: Id = Id::new("shell-about-config-directory");
 pub const CURRENT_LOG_CONTROL: Id = Id::new("shell-about-current-log");
+pub const COPY_DIAGNOSTICS_CONTROL: Id = Id::new("shell-about-copy-diagnostics");
 
 const VERSION_LABEL: &str = "Version";
 const CEF_LABEL: &str = "CEF";
@@ -19,6 +20,7 @@ const CEF_LABEL: &str = "CEF";
 #[derive(Clone, Debug)]
 pub enum Message {
     OpenPath(PathBuf),
+    CopyDiagnostics,
 }
 
 pub struct About {
@@ -41,6 +43,24 @@ impl About {
         for (label, id, path) in self.path_actions() {
             rows = rows.push(self.row(label, &path.to_string_lossy(), Some((id, path.clone()))));
         }
+
+        if let Some(error) = jfn_playback::jfn_playback_snapshot().last_error {
+            let (_, guidance) = error.details();
+            let code = error
+                .code
+                .map_or_else(|| "unknown".to_owned(), |code| code.to_string());
+            rows = rows.push(self.row(
+                "Last playback error",
+                &format!("{} (mpv {code}). {guidance}", error.message),
+                None,
+            ));
+        }
+
+        rows = rows.push(controls::action(
+            COPY_DIAGNOSTICS_CONTROL,
+            button(text("Copy diagnostics")).on_press(Message::CopyDiagnostics),
+            Message::CopyDiagnostics,
+        ));
 
         about_layout(
             image(crate::shell::logo::handle())
@@ -83,6 +103,31 @@ impl About {
             None => wrapped(value).boxed(),
         };
         metadata_row(wrapped(label).class(Some(theme::MUTED)), value)
+    }
+
+    pub fn copy_diagnostics(&self) {
+        let snapshot = jfn_playback::jfn_playback_snapshot();
+        if let Ok(report) = serde_json::to_string_pretty(&self.diagnostics_report(&snapshot))
+            && let Some(lease) = jfn_platform_abi::try_lease()
+        {
+            lease.platform().clipboard_write_text(&report);
+        }
+    }
+
+    fn diagnostics_report(&self, snapshot: &jfn_playback::PlaybackSnapshot) -> serde_json::Value {
+        // Allowlist facts instead of copying logs, URLs, paths, or media metadata.
+        serde_json::json!({
+            "appVersion": self.metadata.app_version,
+            "cefVersion": self.metadata.cef_version,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "phase": format!("{:?}", snapshot.phase),
+            "positionSeconds": snapshot.position_us as f64 / 1_000_000.0,
+            "rate": snapshot.rate,
+            "buffering": snapshot.buffering,
+            "diagnostics": snapshot.diagnostics,
+            "lastPlaybackError": snapshot.last_error,
+        })
     }
 
     /// Opens the row's path through `Platform::open_path`.
@@ -132,6 +177,20 @@ mod tests {
             log_file,
             ..crate::shell::metadata::ApplicationMetadata::testing()
         })
+    }
+
+    #[test]
+    fn diagnostic_report_excludes_paths_and_identifying_settings() {
+        let about = about(Some(PathBuf::from("/private/user/token.log")));
+        let snapshot = jfn_playback::PlaybackSnapshot::default();
+        let report = about.diagnostics_report(&snapshot);
+        let text = report.to_string();
+        assert_eq!(report["appVersion"], "app");
+        assert_eq!(report["phase"], "Stopped");
+        assert!(report["diagnostics"].is_object());
+        for private in ["/private", "/config", "serverUrl", "deviceName", "metadata"] {
+            assert!(!text.contains(private));
+        }
     }
 
     #[test]
