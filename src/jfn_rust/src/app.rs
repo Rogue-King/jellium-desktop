@@ -44,6 +44,7 @@ const STARTUP_BG_HEX: &str = "#101010";
 struct StartupCapture {
     properties: jfn_mpv::api::StartupProperties,
     user_video_bg: Option<u32>,
+    background_pending: bool,
 }
 
 struct ReadyBoot {
@@ -888,6 +889,10 @@ pub fn jfn_app_main() -> c_int {
     let opts = resolve_startup_options(&cli);
 
     init_logging(opts.log_file.as_deref(), &opts.log_level, &version);
+    #[cfg(target_os = "linux")]
+    if let Some(value) = jfn_linux_util::mesa::apply_amd_dcc_workaround(version.major) {
+        tracing::info!(target: "Main", "CEF {} on Linux: AMD_DEBUG={value}", version.major);
+    }
     let metadata = match application_metadata(version) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -1163,6 +1168,13 @@ fn consume_boot_event(boot: &mut StartupCapture, event: jfn_mpv::api::WaitEvent)
         jfn_mpv::api::WaitEvent::Event(jfn_mpv::Event::Shutdown | jfn_mpv::Event::EndFile(_)) => {
             BootEvent::Fatal
         }
+        jfn_mpv::api::WaitEvent::Event(jfn_mpv::Event::SetPropertyReply {
+            reply: jfn_mpv::api::STARTUP_BACKGROUND_SET_REPLY,
+            ..
+        }) => {
+            boot.background_pending = false;
+            BootEvent::Consumed
+        }
         jfn_mpv::api::WaitEvent::Event(event) => {
             jfn_playback::ingest_driver::jfn_playback_ingest_mpv_event_owned(&event, plat());
             BootEvent::Consumed
@@ -1173,13 +1185,14 @@ fn consume_boot_event(boot: &mut StartupCapture, event: jfn_mpv::api::WaitEvent)
 /// Applies the startup override and records the captured color as one state.
 fn apply_startup_background(boot: &mut StartupCapture, user_video_bg: u32) {
     let startup_bg = cs(STARTUP_BG_HEX);
-    unsafe { jfn_mpv::api::jfn_mpv_set_background_color_hex(startup_bg.as_ptr()) };
+    boot.background_pending =
+        unsafe { jfn_mpv::api::jfn_mpv_set_startup_background_color_hex(startup_bg.as_ptr()) };
     boot.user_video_bg = Some(user_video_bg);
 }
 
 /// Produces startup evidence from the current window and captured properties.
 fn boot_progress(boot: &StartupCapture) -> Option<ReadyBoot> {
-    if !boot.properties.is_complete() {
+    if !boot.properties.is_complete() || boot.background_pending {
         return None;
     }
     let user_video_bg = boot.user_video_bg?;
@@ -1327,6 +1340,43 @@ mod lifecycle_tests {
             }));
             assert!(boot_progress(&boot).is_none());
         }
+    }
+
+    #[test]
+    fn boot_waits_for_the_startup_background_write_reply() {
+        let mut boot = StartupCapture {
+            user_video_bg: Some(0x123456),
+            background_pending: true,
+            ..StartupCapture::default()
+        };
+        for name in [
+            "background-color",
+            "demuxer-lavf-list",
+            "display-fps",
+            "mpv-version",
+            "ffmpeg-version",
+        ] {
+            assert!(boot.properties.capture(&jfn_mpv::Event::GetPropertyReply {
+                reply: 1,
+                name: name.into(),
+                error: -10,
+                value: jfn_mpv::PropertyValue::None,
+            }));
+        }
+        assert!(boot.properties.is_complete());
+        assert!(boot_progress(&boot).is_none());
+        assert!(matches!(
+            consume_boot_event(
+                &mut boot,
+                jfn_mpv::api::WaitEvent::Event(jfn_mpv::Event::SetPropertyReply {
+                    reply: jfn_mpv::api::STARTUP_BACKGROUND_SET_REPLY,
+                    error: 0,
+                })
+            ),
+            BootEvent::Consumed
+        ));
+        assert!(!boot.background_pending);
+        assert_eq!(boot.user_video_bg, Some(0x123456));
     }
 
     #[test]

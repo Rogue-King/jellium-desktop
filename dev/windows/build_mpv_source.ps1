@@ -113,6 +113,7 @@ pacman -S --needed --noconfirm \
     $PkgPrefix-vulkan-loader \
     $PkgPrefix-shaderc \
     $PkgPrefix-spirv-cross \
+    $PkgPrefix-luajit \
     $PkgPrefix-llvm \
     $PkgPrefix-tools
 "@ -Description "Installing MSYS2 dependencies"
@@ -131,7 +132,7 @@ cd '$MsysMpvSource' && \
 meson setup build --default-library=shared \
     -Dlibmpv=true \
     -Dcplayer=true \
-    -Dlua=disabled \
+    -Dlua=luajit \
     -Djavascript=disabled \
     -Dcdda=disabled \
     -Ddvdnav=disabled \
