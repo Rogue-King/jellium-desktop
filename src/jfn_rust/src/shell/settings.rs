@@ -1,5 +1,7 @@
 //! Native client settings modal.
 
+use std::path::{Path, PathBuf};
+
 use iced_core::widget::Id;
 use iced_core::{Element, Length, Padding};
 use iced_widget::{Widget as _, button, checkbox, column, scrollable, text};
@@ -15,6 +17,8 @@ pub const AUDIO_PASSTHROUGH_FIELD: Id = Id::new("shell-settings-audio-passthroug
 pub const EXCLUSIVE_AUDIO_CONTROL: Id = Id::new("shell-settings-exclusive-audio");
 pub const CHANNEL_LAYOUT_CONTROL: Id = Id::new("shell-settings-channel-layout");
 pub const FORCE_TRANSCODE_CONTROL: Id = Id::new("shell-settings-force-transcode");
+const DOWNLOAD_DIRECTORY_FIELD: Id = Id::new("shell-settings-download-directory");
+const DOWNLOAD_CONNECTIONS_CONTROL: Id = Id::new("shell-settings-download-connections");
 pub const WINDOW_DECORATION_CONTROL: Id = Id::new("shell-settings-window-decoration");
 pub const TRANSPARENT_TITLEBAR_CONTROL: Id = Id::new("shell-settings-transparent-titlebar");
 pub const HIDE_SCROLLBAR_CONTROL: Id = Id::new("shell-settings-hide-scrollbar");
@@ -30,13 +34,14 @@ pub const FORGET_SERVER_CONTROL: Id = Id::new("shell-settings-forget-server");
 pub const TITLE: &str = "Settings";
 pub const CLOSE_LABEL: &str = "Close Settings";
 
-pub const SECTION_TITLES: [&str; 6] = [
+pub const SECTION_TITLES: [&str; 7] = [
     "Playback",
     "Audio",
     "Transcode",
     "Advanced",
     "MPV config",
     "Server",
+    "Downloads",
 ];
 
 #[derive(Clone, Debug)]
@@ -47,6 +52,9 @@ pub enum Message {
     ExclusiveAudioOutputChanged(bool),
     AudioChannelLayoutChanged(String),
     ForceTranscodingChanged(bool),
+    DownloadDirectoryEdited(String),
+    CommitDownloadDirectory,
+    DownloadConnectionsChanged(u8),
     WindowDecorationsChanged(Option<WindowDecorations>),
     TransparentTitlebarChanged(bool),
     HideScrollbarChanged(bool),
@@ -79,6 +87,8 @@ pub struct Settings {
     servers: Vec<jfn_config::SavedServer>,
     selected_server: Option<jfn_config::SavedServer>,
     server_name: String,
+    download_directory: String,
+    download_directory_error: Option<&'static str>,
 }
 
 impl Default for Settings {
@@ -116,6 +126,9 @@ impl Settings {
             device_name_default: jfn_config::default_device_name(),
             server_available: !jfn_config::server_url().is_empty(),
             decoration_options,
+            download_directory: jfn_config::download_directory()
+                .map_or_else(String::new, |path| path.display().to_string()),
+            download_directory_error: None,
         }
     }
 
@@ -291,11 +304,37 @@ impl Settings {
             Message::ResetSavedServer,
         ));
         controls = controls.push(self.group(SECTION_TITLES[5], servers));
+        controls = controls.push(self.download_settings());
 
         scrollable(controls)
             .id(SETTINGS_SCROLL)
             .height(Length::Fill)
             .boxed()
+    }
+
+    fn download_settings(&self) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
+        let mut controls = column![self.setting(
+            "Download directory",
+            crate::shell::field::field(DOWNLOAD_DIRECTORY_FIELD, "System Downloads folder", &self.download_directory)
+                .on_input(Message::DownloadDirectoryEdited)
+                .on_submit(Message::CommitDownloadDirectory)
+                .on_unfocus(Message::CommitDownloadDirectory)
+                .padding(Padding::from([8, 10]))
+                .boxed(),
+            self.download_directory_error.unwrap_or("Use an existing folder, or leave blank for the system Downloads folder. Changes apply after restart."),
+        )];
+        controls = controls.push(self.selection(
+            "Parallel connections",
+            controls::select(
+                DOWNLOAD_CONNECTIONS_CONTROL,
+                jfn_config::download_connections(),
+                (jfn_config::DEFAULT_DOWNLOAD_CONNECTIONS..=jfn_config::MAX_DOWNLOAD_CONNECTIONS).collect(),
+                u8::to_string,
+                Message::DownloadConnectionsChanged,
+            ),
+            "Connections per download when the server supports byte ranges. Changes apply after restart.",
+        ));
+        self.group(SECTION_TITLES[6], controls)
     }
 
     /// The mode the Hardware Decoding control shows: the stored value itself,
@@ -321,6 +360,18 @@ impl Settings {
                 jfn_config::set_device_name(&self.device_name, &self.device_name_default);
                 jfn_config::settings_save_async();
             }
+            Message::CommitDownloadDirectory => {
+                match validate_download_directory(&self.download_directory) {
+                    Ok(path) => {
+                        self.download_directory_error = None;
+                        if path != jfn_config::download_directory() {
+                            jfn_config::set_download_directory(path);
+                            jfn_config::settings_save_async();
+                        }
+                    }
+                    Err(message) => self.download_directory_error = Some(message),
+                }
+            }
             Message::CommitServerName => {
                 if let Some(server) = &self.selected_server {
                     let url = server.url.clone();
@@ -343,6 +394,7 @@ impl Settings {
         self.commit_text(Message::CommitAudioPassthrough);
         self.commit_text(Message::CommitDeviceName);
         self.commit_text(Message::CommitServerName);
+        self.commit_text(Message::CommitDownloadDirectory);
         Outcome::Dismiss
     }
 
@@ -364,6 +416,18 @@ impl Settings {
             Message::ExclusiveAudioOutputChanged(value) => jfn_config::set_audio_exclusive(value),
             Message::AudioChannelLayoutChanged(value) => jfn_config::set_audio_channels(&value),
             Message::ForceTranscodingChanged(value) => jfn_config::set_force_transcoding(value),
+            Message::DownloadDirectoryEdited(value) => {
+                self.download_directory = value;
+                self.download_directory_error = None;
+                return Outcome::None;
+            }
+            Message::CommitDownloadDirectory => {
+                self.commit_text(Message::CommitDownloadDirectory);
+                return Outcome::None;
+            }
+            Message::DownloadConnectionsChanged(value) => {
+                jfn_config::set_download_connections(value)
+            }
             Message::WindowDecorationsChanged(value) => {
                 jfn_config::set_window_decorations(value.map(WindowDecorations::as_str));
             }
@@ -451,6 +515,8 @@ impl Settings {
             servers: Vec::new(),
             selected_server: None,
             server_name: String::new(),
+            download_directory: String::new(),
+            download_directory_error: None,
         }
     }
 
@@ -531,6 +597,17 @@ fn decoration_options(
         .collect()
 }
 
+fn validate_download_directory(draft: &str) -> Result<Option<PathBuf>, &'static str> {
+    let path = Path::new(draft);
+    if draft.trim().is_empty() {
+        return Ok(None);
+    }
+    if !path.is_absolute() || !path.is_dir() {
+        return Err("Enter the full path to an existing folder. The previous setting was kept.");
+    }
+    Ok(Some(path.to_owned()))
+}
+
 fn transparent_titlebar_visible(display: DisplayBackend) -> bool {
     display == DisplayBackend::MacOS
 }
@@ -562,7 +639,11 @@ fn control_order(display: DisplayBackend, decorations: bool, server: bool) -> Ve
             FORGET_SERVER_CONTROL,
         ]);
     }
-    ids.push(RESET_SERVER_CONTROL);
+    ids.extend([
+        RESET_SERVER_CONTROL,
+        DOWNLOAD_DIRECTORY_FIELD,
+        DOWNLOAD_CONNECTIONS_CONTROL,
+    ]);
     ids
 }
 
@@ -682,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn section_headings_are_the_six_required_peers_in_order() {
+    fn section_headings_are_required_peers_in_order() {
         assert_eq!(
             SECTION_TITLES,
             [
@@ -692,6 +773,7 @@ mod tests {
                 "Advanced",
                 "MPV config",
                 "Server",
+                "Downloads",
             ]
         );
     }
@@ -716,6 +798,8 @@ mod tests {
                 CONNECT_SERVER_CONTROL,
                 FORGET_SERVER_CONTROL,
                 RESET_SERVER_CONTROL,
+                DOWNLOAD_DIRECTORY_FIELD,
+                DOWNLOAD_CONNECTIONS_CONTROL,
             ]
         );
         assert_eq!(
@@ -732,8 +816,23 @@ mod tests {
                 LOG_LEVEL_CONTROL,
                 SERVER_PICKER_CONTROL,
                 RESET_SERVER_CONTROL,
+                DOWNLOAD_DIRECTORY_FIELD,
+                DOWNLOAD_CONNECTIONS_CONTROL,
             ]
         );
+    }
+
+    #[test]
+    fn download_directory_accepts_default_and_existing_absolute_folders() {
+        assert_eq!(validate_download_directory("  "), Ok(None));
+        assert!(validate_download_directory("relative/downloads").is_err());
+        let folder = std::env::current_dir().unwrap();
+        assert_eq!(
+            validate_download_directory(&folder.to_string_lossy()),
+            Ok(Some(folder))
+        );
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        assert!(validate_download_directory(&file.to_string_lossy()).is_err());
     }
 
     #[test]

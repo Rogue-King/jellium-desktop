@@ -6,6 +6,7 @@ use crate::client::Inner;
 
 mod context_menu;
 mod display;
+pub(crate) mod download;
 mod keyboard;
 mod lifespan;
 mod load;
@@ -44,17 +45,20 @@ wrap_client! {
         fn display_handler(&self) -> Option<DisplayHandler> {
             Some(JfnDisplayHandlerBuilder::new(self.inner.clone()))
         }
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            download::handler()
+        }
         fn keyboard_handler(&self) -> Option<KeyboardHandler> {
             Some(JfnKeyboardHandlerBuilder::new(self.inner.clone()))
         }
         fn on_process_message_received(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
+            frame: Option<&mut Frame>,
             _source_process: ProcessId,
             message: Option<&mut ProcessMessage>,
         ) -> c_int {
-            process_message::on_process_message_received(&self.inner, message)
+            process_message::on_process_message_received(&self.inner, frame.as_deref(), message)
         }
     }
 }

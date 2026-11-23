@@ -1,4 +1,4 @@
-use cef::{ImplListValue, ImplProcessMessage, ProcessMessage};
+use cef::{Frame, ImplListValue, ImplProcessMessage, ProcessMessage};
 use std::os::raw::c_int;
 use std::sync::Arc;
 
@@ -8,12 +8,17 @@ use crate::ipc::BrowserMessage;
 
 pub(super) fn on_process_message_received(
     inner: &Arc<Inner>,
+    frame: Option<&Frame>,
     message: Option<&mut ProcessMessage>,
 ) -> c_int {
     let Some(msg) = message else { return 0 };
     let name = userfree_to_string(&msg.name());
     let args = msg.argument_list();
     match name.as_str() {
+        "resumeDownloadAuth" => {
+            super::download::handle_resume_auth(frame, args.as_ref());
+            1
+        }
         "popupOptions" => {
             if let Some(args) = args {
                 let opts = if let Some(list) = args.list(0) {

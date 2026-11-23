@@ -18,6 +18,8 @@ mod init;
 #[cfg(target_os = "macos")]
 mod input;
 #[cfg(target_os = "macos")]
+mod local_player;
+#[cfg(target_os = "macos")]
 mod menu;
 #[cfg(target_os = "macos")]
 mod mpv_host;
@@ -26,3 +28,5 @@ mod ns_menu;
 
 #[cfg(target_os = "macos")]
 pub use backend::*;
+#[cfg(target_os = "macos")]
+pub use local_player::{pick_video_file, run_local_player, show_local_player_error};

@@ -30,6 +30,23 @@ pub struct Cli {
     #[arg(short = 'v', long, action = ArgAction::SetTrue)]
     pub version: bool,
 
+    /// Play a downloaded video in a separate window without connecting to Jellyfin.
+    #[arg(long, value_name = "PATH", conflicts_with = "version")]
+    pub open_file: Option<std::path::PathBuf>,
+
+    /// Save original Jellyfin downloads here instead of opening the browser.
+    #[arg(
+        long = "download-dir",
+        alias = "aria2-downloads",
+        value_name = "DIRECTORY",
+        env = "JELLIUM_ARIA2_DOWNLOADS"
+    )]
+    pub download_dir: Option<std::path::PathBuf>,
+
+    /// Override the saved number of parallel byte-range requests per download.
+    #[arg(long, alias = "aria2-connections", value_parser = clap::value_parser!(u8).range(i64::from(jfn_config::DEFAULT_DOWNLOAD_CONNECTIONS)..=i64::from(jfn_config::MAX_DOWNLOAD_CONNECTIONS)))]
+    pub download_connections: Option<u8>,
+
     /// Log filter, e.g. info | debug | debug,mpv=trace,CEF=off (default: info).
     #[arg(long, env = ENV_LOG_LEVEL)]
     pub log_level: Option<String>,
@@ -134,6 +151,19 @@ mod tests {
 
     fn err_kind(args: &[&str]) -> ErrorKind {
         try_parse(args).expect_err("expected parse error").kind()
+    }
+
+    #[test]
+    fn download_connections_can_override_settings_without_a_directory_flag() {
+        assert_eq!(
+            ok(&["app", "--download-connections", "4"]).download_connections,
+            Some(4)
+        );
+        assert_eq!(
+            ok(&["app", "--aria2-connections", "4"]).download_connections,
+            Some(4)
+        );
+        assert!(try_parse(&["app", "--download-connections", "17"]).is_err());
     }
 
     #[test]

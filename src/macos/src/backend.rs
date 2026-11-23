@@ -605,8 +605,12 @@ impl Platform for MacosPlatform {
         Ok(())
     }
 
-    fn menu_delivery(&self, _kind: MenuKind) -> MenuDelivery<'_> {
-        MenuDelivery::Host(&crate::menu::NsMenuHost)
+    fn menu_delivery(&self, kind: MenuKind) -> MenuDelivery<'_> {
+        match kind {
+            MenuKind::ContextMenu => MenuDelivery::Host(&crate::menu::NsMenuHost),
+            // Committing a native selection through Blink's hidden popup can lose the change.
+            MenuKind::Dropdown => MenuDelivery::Page,
+        }
     }
 
     fn mpv_host(&self) -> &dyn jfn_platform_abi::MpvHost {
@@ -730,4 +734,22 @@ impl Platform for MacosPlatform {
 
 pub fn make_macos_platform() -> Box<dyn Platform> {
     Box::new(MacosPlatform)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropdowns_use_page_delivery_but_context_menus_stay_native() {
+        let platform = MacosPlatform;
+        assert!(matches!(
+            platform.menu_delivery(MenuKind::Dropdown),
+            MenuDelivery::Page
+        ));
+        assert!(matches!(
+            platform.menu_delivery(MenuKind::ContextMenu),
+            MenuDelivery::Host(_)
+        ));
+    }
 }

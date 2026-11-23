@@ -12,6 +12,7 @@ pub mod actor;
 pub mod chrome;
 pub mod connect;
 mod controls;
+mod downloads;
 pub mod field;
 pub mod fields;
 mod fonts;

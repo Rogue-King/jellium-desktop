@@ -4,10 +4,27 @@ An unofficial [Jellyfin](https://jellyfin.org) desktop client built on [CEF](htt
 
 ## Desktop features
 
+- **Open File…** on the connect screen or app menu plays a downloaded video in a separate Jellium player window, without a Jellyfin connection. On macOS, use **File → Open File…** (⌘O). From a terminal, use `jellium-desktop --open-file /path/to/video.mp4`. Offline playback uses Jellyfin-style controls and the same Jellium mpv configuration and hardware-decoding setting as server playback. HDR output still depends on the file, display, and graphics backend. Local playback does not update your Jellyfin watch history.
 - Jellyfin's playback information panel shows actual mpv codecs, hardware decoding, separate output/decoder frame drops, and buffering/cache estimates alongside the play method.
 - **About → Copy diagnostics** copies runtime facts without server URLs, credentials, media titles, or local paths. The last playback failure and recovery guidance are also available in About.
 - Connection errors explain DNS, HTTPS/certificate, HTTP, and invalid-server failures. **Retry** keeps the address; **Edit address** returns to the form.
 - Native **Settings → Server** lets you switch between saved servers and edit their names. **Connect to another server** preserves bookmarks; forgetting the active server disconnects it. Switching stops playback. Existing browser logins are reused, not deleted or split into account profiles.
+
+### Download original media
+
+Use **Download** on a Jellyfin item, then open **Downloads** from Jellium’s app menu to see progress. **Stop** keeps the partial file. To resume after restarting Jellium, sign in to the same server and select **Resume**. Completed files go to your system Downloads folder by default.
+
+In **Client Settings → Downloads**, set the **Download directory** and **Parallel connections** for each download, then restart Jellium. Leave the directory blank to use your system Downloads folder. Partial downloads stay in the folder where they started; switch back to that folder to resume them.
+
+Command-line flags override the saved settings for that launch:
+
+```sh
+jellium-desktop --download-dir "$HOME/Downloads" --download-connections 4
+```
+
+On macOS, use `Jellium Desktop.app/Contents/MacOS/jellium-desktop` as the executable. No separate downloader or network share is needed. Existing files aren’t replaced.
+
+Resume and parallel transfers require byte ranges and an ETag or Last-Modified header. If the server doesn’t provide them, Jellium restarts the transfer from the beginning. The Downloads panel covers original Jellyfin files, not plugin transcodes. The old `--aria2-downloads` and `--aria2-connections` flags still work as aliases.
 
 ## Downloads
 ### Linux

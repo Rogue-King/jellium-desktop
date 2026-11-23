@@ -10,9 +10,11 @@ crate-type = ["rlib"]
 
 [dependencies]
 parking_lot.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls-native-roots"] }
 cef = { workspace = true }
 crossbeam-channel.workspace = true
 crossbeam-utils.workspace = true
+futures-util = "0.3"
 jfn-color = { path = "../color" }
 jfn-config = { path = "../config" }
 jfn-gpu-paint = { path = "../gpu_paint" }
@@ -27,7 +29,10 @@ jfn-playback = { path = "../playback" }
 serde.workspace = true
 serde_json.workspace = true
 slotmap.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+url = "2"
 
 # Dup'ing CEF's dmabuf plane fds at the accelerated-paint boundary.
 [target.'cfg(target_os = "linux")'.dependencies]

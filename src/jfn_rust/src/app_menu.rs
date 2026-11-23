@@ -8,10 +8,14 @@ use jfn_platform_abi::{
 const TOGGLE_FULLSCREEN: i32 = 26_500;
 const CLIENT_SETTINGS: i32 = TOGGLE_FULLSCREEN + 1;
 const EXIT: i32 = TOGGLE_FULLSCREEN + 2;
+const OPEN_FILE: i32 = TOGGLE_FULLSCREEN + 3;
+const DOWNLOADS: i32 = TOGGLE_FULLSCREEN + 4;
 
 fn items(restricted: bool) -> Vec<MenuItem> {
     [
         (TOGGLE_FULLSCREEN, "Toggle Fullscreen"),
+        (OPEN_FILE, "Open File…"),
+        (DOWNLOADS, "Downloads"),
         (CLIENT_SETTINGS, "Settings"),
         (EXIT, "Exit"),
     ]
@@ -33,6 +37,8 @@ fn dispatch(id: i32) -> bool {
                 platform.toggle_fullscreen();
             }
         }
+        OPEN_FILE => crate::local_video::pick(),
+        DOWNLOADS => crate::shell::post(crate::shell::actor::Work::OpenDownloads),
         CLIENT_SETTINGS => crate::shell::shell_open_client_settings(),
         EXIT => jfn_playback::shutdown::jfn_shutdown_initiate(),
         _ => return false,
@@ -83,11 +89,17 @@ mod tests {
     fn restricted_menu_keeps_fullscreen_and_exit_but_omits_settings() {
         assert_eq!(
             items(false).iter().map(|item| item.id).collect::<Vec<_>>(),
-            [TOGGLE_FULLSCREEN, CLIENT_SETTINGS, EXIT]
+            [
+                TOGGLE_FULLSCREEN,
+                OPEN_FILE,
+                DOWNLOADS,
+                CLIENT_SETTINGS,
+                EXIT
+            ]
         );
         assert_eq!(
             items(true).iter().map(|item| item.id).collect::<Vec<_>>(),
-            [TOGGLE_FULLSCREEN, EXIT]
+            [TOGGLE_FULLSCREEN, OPEN_FILE, DOWNLOADS, EXIT]
         );
         assert!(!dispatch(jfn_platform_abi::MENU_DISMISSED));
     }

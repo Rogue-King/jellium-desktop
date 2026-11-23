@@ -13,7 +13,7 @@ impl Inner {
         self.browser.lock().browser.clone()
     }
 
-    pub(super) fn host(&self) -> Option<BrowserHost> {
+    pub(crate) fn host(&self) -> Option<BrowserHost> {
         self.browser_clone().and_then(|b| b.host())
     }
 

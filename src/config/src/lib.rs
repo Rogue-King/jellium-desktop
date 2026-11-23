@@ -15,6 +15,8 @@ mod hardware_decode;
 pub use hardware_decode::{HWDEC_DEFAULT, Hwdec, UnknownHwdec, hwdec_options};
 
 const DEVICE_NAME_MAX: usize = 64;
+pub const DEFAULT_DOWNLOAD_CONNECTIONS: u8 = 1;
+pub const MAX_DOWNLOAD_CONNECTIONS: u8 = 16;
 
 #[derive(Clone, Debug, Default)]
 pub struct JfnWindowGeometry {
@@ -45,6 +47,8 @@ impl std::fmt::Display for SavedServer {
 struct SettingsData {
     server_url: String,
     saved_servers: Vec<SavedServer>,
+    download_directory: Option<PathBuf>,
+    download_connections: u8,
     hwdec: Hwdec,
     audio_passthrough: String,
     audio_channels: String,
@@ -64,6 +68,8 @@ impl Default for SettingsData {
         Self {
             server_url: String::new(),
             saved_servers: Vec::new(),
+            download_directory: None,
+            download_connections: DEFAULT_DOWNLOAD_CONNECTIONS,
             hwdec: Hwdec::default(),
             audio_passthrough: String::new(),
             audio_channels: String::new(),
@@ -90,6 +96,12 @@ struct SettingsFile {
 
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     saved_servers: Option<Vec<SavedServer>>,
+
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    download_directory: Option<PathBuf>,
+
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    download_connections: Option<u8>,
 
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     window_width: Option<i32>,
@@ -257,6 +269,15 @@ impl SettingsData {
     }
 
     fn overlay(&mut self, file: SettingsFile) {
+        if let Some(path) = file.download_directory.filter(|path| path.is_absolute()) {
+            self.download_directory = Some(path);
+        }
+        if let Some(connections) = file
+            .download_connections
+            .filter(|n| (DEFAULT_DOWNLOAD_CONNECTIONS..=MAX_DOWNLOAD_CONNECTIONS).contains(n))
+        {
+            self.download_connections = connections;
+        }
         if let Some(v) = file.server_url {
             self.server_url = v;
         }
@@ -347,6 +368,9 @@ impl SettingsData {
         SettingsFile {
             server_url: Some(self.server_url.clone()),
             saved_servers: (!self.saved_servers.is_empty()).then(|| self.saved_servers.clone()),
+            download_directory: self.download_directory.clone(),
+            download_connections: (self.download_connections != DEFAULT_DOWNLOAD_CONNECTIONS)
+                .then_some(self.download_connections),
             window_width: self.window.physical.map(|s| s.w),
             window_height: self.window.physical.map(|s| s.h),
             window_logical_width: self.window.logical.map(|s| s.w),
@@ -568,6 +592,23 @@ macro_rules! bool_accessors {
     };
 }
 
+pub fn download_directory() -> Option<PathBuf> {
+    state().lock().data.download_directory.clone()
+}
+
+pub fn set_download_directory(path: Option<PathBuf>) {
+    state().lock().data.download_directory = path.filter(|path| path.is_absolute());
+}
+
+pub fn download_connections() -> u8 {
+    state().lock().data.download_connections
+}
+
+pub fn set_download_connections(connections: u8) {
+    state().lock().data.download_connections =
+        connections.clamp(DEFAULT_DOWNLOAD_CONNECTIONS, MAX_DOWNLOAD_CONNECTIONS);
+}
+
 pub fn server_url() -> String {
     state().lock().data.server_url.clone()
 }
@@ -784,6 +825,8 @@ mod tests {
                 name: "Home".into(),
                 url: "http://host".into(),
             }],
+            download_directory: Some(std::env::temp_dir()),
+            download_connections: 4,
             hwdec: "auto".parse().expect("auto is offered everywhere"),
             audio_passthrough: "eac3".into(),
             audio_channels: "stereo".into(),
@@ -811,6 +854,8 @@ mod tests {
             [
                 "serverUrl",
                 "savedServers",
+                "downloadDirectory",
+                "downloadConnections",
                 "windowWidth",
                 "windowHeight",
                 "windowLogicalWidth",
@@ -833,6 +878,23 @@ mod tests {
             ]
         );
         assert!(text.contains(r#""windowDecorations":"serverThemed""#));
+    }
+
+    #[test]
+    fn download_settings_round_trip_and_ignore_invalid_values() {
+        let directory = std::env::temp_dir();
+        let json = serde_json::json!({"downloadDirectory": directory, "downloadConnections": 4});
+        let data = loaded(&json.to_string());
+        let restored = loaded(&serde_json::to_string(&data.to_file()).expect("serializes"));
+        assert_eq!(restored.download_directory.as_ref(), Some(&directory));
+        assert_eq!(restored.download_connections, 4);
+
+        let invalid = loaded(r#"{"downloadDirectory":"relative/path","downloadConnections":17}"#);
+        assert!(invalid.download_directory.is_none());
+        assert_eq!(
+            invalid.download_connections,
+            super::DEFAULT_DOWNLOAD_CONNECTIONS
+        );
     }
 
     #[test]

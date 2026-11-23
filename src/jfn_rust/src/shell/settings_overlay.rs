@@ -12,10 +12,12 @@ use crate::shell::theme::{self, Theme};
 
 pub const SETTINGS_TAB_CONTROL: Id = Id::new("shell-settings-tab");
 pub const ABOUT_TAB_CONTROL: Id = Id::new("shell-about-tab");
+const DOWNLOADS_TAB_CONTROL: Id = Id::new("shell-downloads-tab");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Settings,
+    Downloads,
     About,
 }
 
@@ -25,6 +27,7 @@ pub enum Message {
     Swallow,
     Select(Tab),
     Settings(settings::Message),
+    Downloads(super::downloads::Message),
     About(crate::shell::about::Message),
 }
 
@@ -144,6 +147,10 @@ impl SettingsOverlay {
                 settings::Outcome::ResetSavedServer => Outcome::ResetSavedServer,
                 settings::Outcome::ConnectServer(url) => Outcome::ConnectServer(url),
             },
+            Message::Downloads(message) => {
+                super::downloads::update(message);
+                Outcome::None
+            }
             Message::About(crate::shell::about::Message::OpenPath(path)) => {
                 self.about.open(&path);
                 Outcome::None
@@ -163,6 +170,13 @@ impl SettingsOverlay {
                 .class(tab_class(self.active == Tab::Settings)),
             Message::Select(Tab::Settings),
         );
+        let downloads_tab = controls::tab(
+            DOWNLOADS_TAB_CONTROL,
+            button(text("Downloads"))
+                .on_press(Message::Select(Tab::Downloads))
+                .class(tab_class(self.active == Tab::Downloads)),
+            Message::Select(Tab::Downloads),
+        );
         let about_tab = controls::tab(
             ABOUT_TAB_CONTROL,
             button(text("About"))
@@ -179,6 +193,7 @@ impl SettingsOverlay {
         );
         let header = row![
             settings_tab,
+            downloads_tab,
             about_tab,
             iced_widget::space::horizontal(),
             close
@@ -187,6 +202,7 @@ impl SettingsOverlay {
         .spacing(12);
         let content = match self.active {
             Tab::Settings => self.settings.view().map(Message::Settings).boxed(),
+            Tab::Downloads => super::downloads::view().map(Message::Downloads).boxed(),
             Tab::About => self.about.view().map(Message::About).boxed(),
         };
         let body = column![header, content].spacing(18);
@@ -215,6 +231,7 @@ impl SettingsOverlay {
     pub fn focus_target(&self) -> Option<Id> {
         match self.active {
             Tab::Settings => self.settings.focus_target(),
+            Tab::Downloads => Some(DOWNLOADS_TAB_CONTROL),
             Tab::About => Some(ABOUT_TAB_CONTROL),
         }
     }
@@ -247,7 +264,7 @@ mod tests {
 
     fn outer_card_bounds(tab: Tab, viewport: iced_core::Size) -> iced_core::Rectangle {
         let body = match tab {
-            Tab::Settings => Space::new().width(Length::Fill).height(Length::Fill),
+            Tab::Settings | Tab::Downloads => Space::new().width(Length::Fill).height(Length::Fill),
             Tab::About => Space::new()
                 .width(Length::Fixed(1.0))
                 .height(Length::Fixed(1.0)),

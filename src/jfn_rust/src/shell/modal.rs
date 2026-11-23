@@ -41,6 +41,7 @@ pub enum Transition {
     OpenAbout,
     /// A shared app menu or the web UI asked for client settings.
     OpenClientSettings,
+    OpenDownloads,
     /// Escape reached the stack unhandled.
     Escape,
     /// A message the top view published.
@@ -116,6 +117,7 @@ impl Stack {
         match transition {
             Transition::OpenAbout => self.open_overlay(Tab::About),
             Transition::OpenClientSettings => self.open_overlay(Tab::Settings),
+            Transition::OpenDownloads => self.open_overlay(Tab::Downloads),
             Transition::Escape => match self.top() {
                 Some(View::Connect(_)) => connection.cancel(),
                 Some(View::SettingsOverlay(_)) => {
@@ -152,6 +154,7 @@ impl Stack {
                 crate::shell::connect::Message::UrlEdited(url) => connection.edit_url(url),
                 crate::shell::connect::Message::Submit => connection.connect(),
                 crate::shell::connect::Message::DismissFailure => connection.dismiss_failure(),
+                crate::shell::connect::Message::OpenFile => crate::local_video::pick(),
                 crate::shell::connect::Message::SavedServerSelected(Some(server)) => {
                     connection.switch_server(server.url)
                 }

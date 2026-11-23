@@ -19,8 +19,8 @@ wrap_life_span_handler! {
         }
         fn on_before_popup(
             &self,
-            _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
             _popup_id: c_int,
             target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
@@ -33,6 +33,11 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut c_int>,
         ) -> c_int {
+            if let (Some(browser), Some(frame), Some(target)) = (browser, frame, target_url)
+                && super::download::start_from_popup(browser, frame, target)
+            {
+                return 1;
+            }
             let url = target_url.map(|s| s.to_string()).unwrap_or_default();
             if self.inner.on_before_popup(&url) { 1 } else { 0 }
         }

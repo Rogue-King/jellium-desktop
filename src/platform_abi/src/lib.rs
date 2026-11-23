@@ -749,6 +749,18 @@ pub fn request_client_settings() {
     }
 }
 
+static OPEN_FILE_HANDLER: OnceLock<fn()> = OnceLock::new();
+
+pub fn set_open_file_handler(f: fn()) {
+    let _ = OPEN_FILE_HANDLER.set(f);
+}
+
+pub fn request_open_file() {
+    if let Some(f) = OPEN_FILE_HANDLER.get() {
+        f();
+    }
+}
+
 static DECORATIONS_LISTENERS: std::sync::LazyLock<subscriptions::Subscribers> =
     std::sync::LazyLock::new(subscriptions::Subscribers::new);
 pub use subscriptions::Subscription as DecorationsSubscription;

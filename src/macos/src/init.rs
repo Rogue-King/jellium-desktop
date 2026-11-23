@@ -247,6 +247,11 @@ define_class!(
     pub struct JellyfinAppMenuTarget;
 
     impl JellyfinAppMenuTarget {
+        #[unsafe(method(openVideoFile:))]
+        fn open_video_file(&self, _sender: *mut AnyObject) {
+            jfn_platform_abi::request_open_file();
+        }
+
         #[unsafe(method(showAbout:))]
         unsafe fn show_about(&self, _sender: *mut AnyObject) {
             // The installed shell handler retargets the persistent overlay to
@@ -715,7 +720,7 @@ pub fn macos_init(_mpv: *mut c_void) -> Result<(), jfn_platform_abi::PlatformIni
             // only need one process-wide, a static block suffices.
             // The block signature for the swizzled method is
             //   BOOL block(id self, NSWindow* win).
-            unsafe extern "C" fn close_block_invoke(
+            extern "C" fn close_block_invoke(
                 _block: *mut c_void,
                 _self_: *mut AnyObject,
                 _win: *mut AnyObject,
@@ -980,6 +985,26 @@ pub fn macos_early_init() {
         let _: () = msg_send![app_item, setSubmenu: app_menu];
         let _: () = msg_send![app_menu, release];
         let _: () = msg_send![app_item, release];
+
+        // -- File menu ---------------------------------------------------
+        let file_item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
+        let file_item: *mut AnyObject = msg_send![file_item, init];
+        let _: () = msg_send![menubar, addItem: file_item];
+        let file_menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
+        let title_ns: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"File".as_ptr()];
+        let file_menu: *mut AnyObject = msg_send![file_menu, initWithTitle: title_ns];
+        add_menu_item(
+            file_menu,
+            "Open File…",
+            sel!(openVideoFile:),
+            "o",
+            Some(mt_obj),
+            0,
+        );
+        let _: () = msg_send![file_item, setSubmenu: file_menu];
+        let _: () = msg_send![file_menu, release];
+        let _: () = msg_send![file_item, release];
 
         // -- Edit menu ---------------------------------------------------
         let edit_item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];

@@ -44,6 +44,7 @@ pub enum Work {
     Redraw,
     OpenAbout,
     OpenClientSettings,
+    OpenDownloads,
     Chrome(ChromeInputs),
     /// The buffered theme colour changed; the titlebar and backdrop repaint.
     ChromeBackground(iced_core::Color),
@@ -770,6 +771,10 @@ impl Loop {
             }
             Work::OpenClientSettings => {
                 self.model.transition(Transition::OpenClientSettings);
+                self.discard_cache();
+            }
+            Work::OpenDownloads => {
+                self.model.transition(Transition::OpenDownloads);
                 self.discard_cache();
             }
             Work::Chrome(inputs) => self.model.inputs = inputs,

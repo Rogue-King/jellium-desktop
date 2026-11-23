@@ -29,6 +29,10 @@ pub mod web_overlay;
 
 pub use app_menu::ApplicationMenu;
 pub use client::{ContextBuilderFn, ContextDispatcherFn, CreatedFn};
+pub use client_impl::download::{
+    DownloadRow, DownloadState, download_directory, download_rows, enable_downloads,
+    resume_download, stop_download,
+};
 pub use web_overlay::{CloseDeliveryError, WebOverlay, WebOverlayConfig};
 
 pub const APP_VERSION: &str = env!("JFN_APP_VERSION");

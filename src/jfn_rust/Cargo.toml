@@ -20,6 +20,7 @@ kde-palette = ["jfn-wayland/kde-palette"]
 png = "0.18"
 
 [dependencies]
+dirs = "7"
 iced_core.workspace = true
 iced_graphics.workspace = true
 iced_runtime.workspace = true
@@ -48,6 +49,7 @@ jfn-instance-ipc = { path = "../instance_ipc" }
 jfn-wake-event = { path = "../wake_event" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 thiserror.workspace = true
+time = { version = "0.3", features = ["local-offset"] }
 
 
 [target.'cfg(target_os = "macos")'.dependencies]

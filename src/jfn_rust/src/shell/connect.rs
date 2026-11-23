@@ -29,12 +29,25 @@ pub enum Message {
     UrlEdited(String),
     Submit,
     DismissFailure,
+    OpenFile,
     SavedServerSelected(Option<jfn_config::SavedServer>),
 }
 
 pub struct Connect {
     /// Owned here so a widget-cache rebuild does not restart the turn.
     spinner_started: Instant,
+}
+
+fn open_file_button() -> Element<'static, Message, Theme, iced_wgpu::Renderer> {
+    crate::shell::controls::action(
+        Id::new("shell-connect-open-file"),
+        button(text("Open File…"))
+            .on_press(Message::OpenFile)
+            .class(theme::ButtonClass::Tab)
+            .padding(Padding::from([8, 16])),
+        Message::OpenFile,
+    )
+    .boxed()
 }
 
 impl Default for Connect {
@@ -113,7 +126,7 @@ impl Connect {
                 Message::SavedServerSelected,
             ));
         }
-        form.boxed()
+        form.push(open_file_button()).boxed()
     }
 
     fn spinner_view(&self, screen: &Screen) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
@@ -153,6 +166,7 @@ impl Connect {
                 button(text("Edit address").center()).on_press(Message::DismissFailure),
                 Message::DismissFailure
             ),
+            open_file_button(),
         ]
         .spacing(32)
         .align_x(Alignment::Center)

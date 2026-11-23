@@ -160,11 +160,11 @@ fn setup_mpv_environment() -> Result<(), jfn_platform_abi::PlatformInitError> {
         .prepare(jfn_config::configured_window_decorations())
 }
 
-struct StartupOptions {
-    hwdec: jfn_config::Hwdec,
-    audio_passthrough: String,
-    audio_exclusive: bool,
-    audio_channels: String,
+pub(crate) struct StartupOptions {
+    pub(crate) hwdec: jfn_config::Hwdec,
+    pub(crate) audio_passthrough: String,
+    pub(crate) audio_exclusive: bool,
+    pub(crate) audio_channels: String,
     log_level: String,
     /// The file logs are written to; `None` disables file logging.
     log_file: Option<PathBuf>,
@@ -172,7 +172,7 @@ struct StartupOptions {
     remote_debugging_port: jfn_cef::DebuggingPort,
 }
 
-fn resolve_startup_options(cli: &cli::Cli) -> StartupOptions {
+pub(crate) fn resolve_startup_options(cli: &cli::Cli) -> StartupOptions {
     let saved_hwdec = jfn_config::hwdec();
     let saved_pass = jfn_config::audio_passthrough();
     let saved_chans = jfn_config::audio_channels();
@@ -938,8 +938,18 @@ fn application_metadata(cef_version: CefVersion) -> std::io::Result<ApplicationM
     })
 }
 
+pub(crate) fn load_client_settings() {
+    let path = jfn_paths::config_dir().join("settings.json");
+    jfn_config::settings_init(&path);
+    jfn_config::settings_load();
+}
+
 pub fn jfn_app_main() -> c_int {
+    if let Some(code) = crate::local_video::run_if_requested() {
+        return code;
+    }
     crate::platform_install::install_early();
+    jfn_platform_abi::set_open_file_handler(crate::local_video::pick);
 
     let cef_runtime = match LoadedCef::load() {
         Ok(runtime) => runtime,
@@ -969,13 +979,26 @@ pub fn jfn_app_main() -> c_int {
         jfn_paths::set_cache_dir_override(path.into());
     }
 
-    let settings_path = jfn_paths::config_dir().join("settings.json");
-    jfn_config::settings_init(&settings_path);
-    jfn_config::settings_load();
+    load_client_settings();
 
     let opts = resolve_startup_options(&cli);
 
     init_logging(opts.log_file.as_deref(), &opts.log_level, &version);
+    let download_dir = cli
+        .download_dir
+        .clone()
+        .or_else(jfn_config::download_directory)
+        .or_else(dirs::download_dir);
+    let download_connections = cli
+        .download_connections
+        .unwrap_or_else(jfn_config::download_connections);
+    if let Some(directory) = download_dir.as_deref()
+        && let Err(error) = jfn_cef::enable_downloads(directory, download_connections, || {
+            crate::shell::post(crate::shell::actor::Work::Redraw);
+        })
+    {
+        tracing::error!(target: "Main", "Jellyfin downloads are disabled: {error}");
+    }
     #[cfg(target_os = "linux")]
     if let Some(value) = jfn_linux_util::mesa::apply_amd_dcc_workaround(version.major) {
         tracing::info!(target: "Main", "CEF {} on Linux: AMD_DEBUG={value}", version.major);

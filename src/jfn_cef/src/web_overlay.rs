@@ -499,6 +499,55 @@ pub(crate) fn with_current_client<R>(f: impl FnOnce(&Inner) -> R) -> Option<R> {
         .flatten()
 }
 
+/// Open the browser host's native file picker from a desktop UI action.
+pub fn pick_video_file(open: fn(std::path::PathBuf)) -> Result<(), crate::ui_task::UiTaskRejected> {
+    crate::ui_task::post_ui(&mut PickVideoTask::new(open))
+}
+
+mod file_picker {
+    use cef::rc::Rc;
+    use cef::{
+        CefString, CefStringList, FileDialogMode, ImplBrowserHost, ImplRunFileDialogCallback,
+        ImplTask, RunFileDialogCallback, Task, WrapRunFileDialogCallback, WrapTask,
+        wrap_run_file_dialog_callback, wrap_task,
+    };
+    use std::path::PathBuf;
+
+    wrap_task! {
+        pub(super) struct PickVideoTask { open: fn(PathBuf) }
+        impl Task {
+            fn execute(&self) {
+                super::with_current_client(|client| {
+                    if let Some(host) = client.host() {
+                        host.run_file_dialog(
+                            FileDialogMode::OPEN,
+                            Some(&CefString::from("Open Video")),
+                            None,
+                            None,
+                            Some(&mut OpenVideoCallback::new(self.open)),
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    wrap_run_file_dialog_callback! {
+        struct OpenVideoCallback { open: fn(PathBuf) }
+        impl RunFileDialogCallback {
+            fn on_file_dialog_dismissed(&self, file_paths: Option<&mut CefStringList>) {
+                if let Some(paths) = file_paths {
+                    let borrowed = CefStringList::from(<*mut cef::sys::_cef_string_list_t>::from(paths));
+                    if let Some(path) = borrowed.into_iter().next() {
+                        (self.open)(PathBuf::from(path));
+                    }
+                }
+            }
+        }
+    }
+}
+use file_picker::PickVideoTask;
+
 fn sync_started() {
     if let Some(inner) = STARTED.lock().upgrade()
         && let Err(e) = (WebOverlay { inner }).sync()
